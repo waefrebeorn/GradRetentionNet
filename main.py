@@ -5,24 +5,33 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 
-# Custom optimizer with persistent gradient accumulation based on Kalomaze's idea
-class PersistentSGD(optim.Optimizer):
+# Custom optimizer with ephemeral gradient application based on Kalomaze's idea
+class EphemeralSGD(optim.Optimizer):
     def __init__(self, params, lr=0.01, decay=0.99):
         defaults = dict(lr=lr, decay=decay)
-        super(PersistentSGD, self).__init__(params, defaults)
+        super(EphemeralSGD, self).__init__(params, defaults)
 
     def step(self, closure=None):
-        """Performs a single optimization step."""
+        """Performs a single ephemeral optimization step (does not permanently update weights)."""
         loss = None
         if closure is not None:
             loss = closure()
 
+        # Save the original state of the parameters
+        original_params = []
         for group in self.param_groups:
-            decay = group['decay']
             for p in group['params']:
                 if p.grad is None:
                     continue
+                # Store a copy of the original parameter state
+                original_params.append(p.data.clone())
 
+        # Apply temporary updates using ephemeral gradients
+        for group in self.param_groups:
+            decay = group['decay']
+            for p, orig in zip(group['params'], original_params):
+                if p.grad is None:
+                    continue
                 # Create state for persistent gradient if it doesn't exist
                 state = self.state[p]
                 if 'persistent_grad' not in state:
@@ -32,8 +41,13 @@ class PersistentSGD(optim.Optimizer):
                 persistent_grad = state['persistent_grad']
                 persistent_grad.mul_(decay).add_(p.grad.data)
 
-                # Update weights using the accumulated persistent gradient
+                # Apply temporary update using persistent gradients
                 p.data.add_(-group['lr'], persistent_grad)
+
+        # Calculate the temporary loss and revert to the original parameter state
+        loss = closure() if closure is not None else None
+        for p, orig in zip([p for group in self.param_groups for p in group['params']], original_params):
+            p.data.copy_(orig)  # Revert the weights to the original state
 
         return loss
 
@@ -52,8 +66,34 @@ class SimpleNet(nn.Module):
         return x
 
 
-# Training function
-def train(model, device, train_loader, optimizer, epoch, log_interval=100):
+# Training function for ephemeral updates
+def train_ephemeral(model, device, train_loader, optimizer, epoch, log_interval=100):
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    epoch_loss = 0
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()  # Clear existing gradients
+
+        def closure():
+            """Closure function to calculate the loss."""
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            return loss
+
+        # Use ephemeral step for virtual loss calculation
+        loss = optimizer.step(closure)
+        epoch_loss += loss.item()
+
+        if batch_idx % log_interval == 0:
+            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
+                  f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
+    return epoch_loss / len(train_loader)
+
+
+# Standard training function
+def train_standard(model, device, train_loader, optimizer, epoch, log_interval=100):
     model.train()
     criterion = nn.CrossEntropyLoss()
     epoch_loss = 0
@@ -68,7 +108,7 @@ def train(model, device, train_loader, optimizer, epoch, log_interval=100):
         if batch_idx % log_interval == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
-    return epoch_loss / len(train_loader)  # Return average epoch loss
+    return epoch_loss / len(train_loader)
 
 
 # Validation function
@@ -89,7 +129,7 @@ def validate(model, device, val_loader):
     accuracy = 100. * correct / len(val_loader.dataset)
     print(f'\nValidation set: Average loss: {val_loss:.4f}, Accuracy: {correct}/{len(val_loader.dataset)} '
           f'({accuracy:.0f}%)\n')
-    return val_loss, accuracy  # Return validation loss and accuracy
+    return val_loss, accuracy
 
 
 # Testing function
@@ -110,10 +150,10 @@ def test(model, device, test_loader):
     accuracy = 100. * correct / len(test_loader.dataset)
     print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} '
           f'({accuracy:.0f}%)\n')
-    return test_loss, accuracy  # Return test loss and accuracy
+    return test_loss, accuracy
 
 
-# Plotting function
+# Plotting function for training and validation losses
 def plot_losses(epochs, train_losses, val_losses, labels, title):
     """Plot the training and validation loss for different optimizers."""
     for i, loss in enumerate(train_losses):
@@ -128,7 +168,7 @@ def plot_losses(epochs, train_losses, val_losses, labels, title):
     plt.show()
 
 
-# Main script
+# Main script for comprehensive testing and graphing
 def main():
     # Hyperparameters and setup
     batch_size = 64
@@ -152,38 +192,51 @@ def main():
                              batch_size=1000, shuffle=False)
 
     # Initialize models and optimizers
-    model_persistent = SimpleNet().to(device)
+    model_ephemeral = SimpleNet().to(device)
     model_adamw = SimpleNet().to(device)
-    optimizer_persistent = PersistentSGD(model_persistent.parameters(), lr=learning_rate)
+    model_sgd = SimpleNet().to(device)
+
+    optimizer_ephemeral = EphemeralSGD(model_ephemeral.parameters(), lr=learning_rate)
     optimizer_adamw = optim.AdamW(model_adamw.parameters(), lr=learning_rate)
+    optimizer_sgd = optim.SGD(model_sgd.parameters(), lr=learning_rate)
 
     # Track losses for plotting
-    persistent_train_losses, persistent_val_losses = [], []
+    ephemeral_train_losses, ephemeral_val_losses = [], []
     adamw_train_losses, adamw_val_losses = [], []
+    sgd_train_losses, sgd_val_losses = [], []
 
-    # Train models for all epochs and validate
+    # Train and validate models for all epochs
     for epoch in range(1, epochs + 1):
-        train_loss_persistent = train(model_persistent, device, train_loader, optimizer_persistent, epoch)
-        val_loss_persistent, _ = validate(model_persistent, device, val_loader)
+        ephemeral_train_loss = train_ephemeral(model_ephemeral, device, train_loader, optimizer_ephemeral, epoch)
+        val_loss_ephemeral, _ = validate(model_ephemeral, device, val_loader)
 
-        train_loss_adamw = train(model_adamw, device, train_loader, optimizer_adamw, epoch)
+        adamw_train_loss = train_standard(model_adamw, device, train_loader, optimizer_adamw, epoch)
         val_loss_adamw, _ = validate(model_adamw, device, val_loader)
 
-        persistent_train_losses.append(train_loss_persistent)
-        persistent_val_losses.append(val_loss_persistent)
+        sgd_train_loss = train_standard(model_sgd, device, train_loader, optimizer_sgd, epoch)
+        val_loss_sgd, _ = validate(model_sgd, device, val_loader)
 
-        adamw_train_losses.append(train_loss_adamw)
+        ephemeral_train_losses.append(ephemeral_train_loss)
+        ephemeral_val_losses.append(val_loss_ephemeral)
+
+        adamw_train_losses.append(adamw_train_loss)
         adamw_val_losses.append(val_loss_adamw)
 
+        sgd_train_losses.append(sgd_train_loss)
+        sgd_val_losses.append(val_loss_sgd)
+
     # Plot the training and validation loss curves for comparison
-    plot_losses(epochs, [persistent_train_losses, adamw_train_losses],
-                [persistent_val_losses, adamw_val_losses], ['PersistentSGD', 'AdamW'], 'Training & Validation Loss Comparison')
+    plot_losses(epochs, [ephemeral_train_losses, adamw_train_losses, sgd_train_losses],
+                [ephemeral_val_losses, adamw_val_losses, sgd_val_losses],
+                ['EphemeralSGD', 'AdamW', 'SGD'], 'Training & Validation Loss Comparison for Multiple Optimizers')
 
     # Test the models and output results
-    print("Testing PersistentSGD Model")
-    test(model_persistent, device, test_loader)
+    print("Testing EphemeralSGD Model")
+    test(model_ephemeral, device, test_loader)
     print("Testing AdamW Model")
     test(model_adamw, device, test_loader)
+    print("Testing SGD Model")
+    test(model_sgd, device, test_loader)
 
 
 if __name__ == '__main__':
