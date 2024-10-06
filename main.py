@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 
 # Custom optimizer with persistent gradient accumulation based on Kalomaze's idea
@@ -34,40 +34,6 @@ class PersistentSGD(optim.Optimizer):
 
                 # Update weights using the accumulated persistent gradient
                 p.data.add_(-group['lr'], persistent_grad)
-
-        return loss
-
-
-# Custom AdEMA optimizer for comparison
-class AdEMA(optim.Optimizer):
-    def __init__(self, params, lr=0.001, beta=0.999, decay=0.999):
-        defaults = dict(lr=lr, beta=beta, decay=decay)
-        super(AdEMA, self).__init__(params, defaults)
-
-    def step(self, closure=None):
-        """Performs a single optimization step."""
-        loss = None
-        if closure is not None:
-            loss = closure()
-
-        for group in self.param_groups:
-            beta = group['beta']
-            decay = group['decay']
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-
-                # Create state for EMA gradients if it doesn't exist
-                state = self.state[p]
-                if 'exp_avg' not in state:
-                    state['exp_avg'] = torch.zeros_like(p.data)
-
-                # Calculate exponential moving average of gradients
-                exp_avg = state['exp_avg']
-                exp_avg.mul_(beta).add_(1 - beta, p.grad.data)
-
-                # Apply decay and update weights
-                p.data.add_(-group['lr'] * (1 - decay), exp_avg)
 
         return loss
 
@@ -105,6 +71,27 @@ def train(model, device, train_loader, optimizer, epoch, log_interval=100):
     return epoch_loss / len(train_loader)  # Return average epoch loss
 
 
+# Validation function
+def validate(model, device, val_loader):
+    model.eval()
+    val_loss = 0
+    correct = 0
+    criterion = nn.CrossEntropyLoss()
+    with torch.no_grad():
+        for data, target in val_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            val_loss += criterion(output, target).item()  # Sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # Get index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+    val_loss /= len(val_loader.dataset)
+    accuracy = 100. * correct / len(val_loader.dataset)
+    print(f'\nValidation set: Average loss: {val_loss:.4f}, Accuracy: {correct}/{len(val_loader.dataset)} '
+          f'({accuracy:.0f}%)\n')
+    return val_loss, accuracy  # Return validation loss and accuracy
+
+
 # Testing function
 def test(model, device, test_loader):
     model.eval()
@@ -123,14 +110,16 @@ def test(model, device, test_loader):
     accuracy = 100. * correct / len(test_loader.dataset)
     print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} '
           f'({accuracy:.0f}%)\n')
-    return test_loss, accuracy  # Return loss and accuracy
+    return test_loss, accuracy  # Return test loss and accuracy
 
 
 # Plotting function
-def plot_losses(epochs, losses, labels, title):
-    """Plot the training loss for different optimizers."""
-    for i, loss in enumerate(losses):
-        plt.plot(range(1, epochs + 1), loss, label=labels[i])
+def plot_losses(epochs, train_losses, val_losses, labels, title):
+    """Plot the training and validation loss for different optimizers."""
+    for i, loss in enumerate(train_losses):
+        plt.plot(range(1, epochs + 1), loss, label=f'Train {labels[i]}')
+    for i, loss in enumerate(val_losses):
+        plt.plot(range(1, epochs + 1), loss, linestyle='--', label=f'Val {labels[i]}')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title(title)
@@ -150,8 +139,15 @@ def main():
 
     # Data transformation and loaders
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    train_loader = DataLoader(datasets.MNIST('./data', train=True, download=True, transform=transform),
-                              batch_size=batch_size, shuffle=True)
+    full_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+    
+    # Split the training set into training and validation sets
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1000, shuffle=False)
     test_loader = DataLoader(datasets.MNIST('./data', train=False, transform=transform),
                              batch_size=1000, shuffle=False)
 
@@ -162,17 +158,26 @@ def main():
     optimizer_adamw = optim.AdamW(model_adamw.parameters(), lr=learning_rate)
 
     # Track losses for plotting
-    persistent_losses, adamw_losses = [], []
+    persistent_train_losses, persistent_val_losses = [], []
+    adamw_train_losses, adamw_val_losses = [], []
 
-    # Train models for all epochs
+    # Train models for all epochs and validate
     for epoch in range(1, epochs + 1):
         train_loss_persistent = train(model_persistent, device, train_loader, optimizer_persistent, epoch)
-        train_loss_adamw = train(model_adamw, device, train_loader, optimizer_adamw, epoch)
-        persistent_losses.append(train_loss_persistent)
-        adamw_losses.append(train_loss_adamw)
+        val_loss_persistent, _ = validate(model_persistent, device, val_loader)
 
-    # Plot the training loss curves for comparison
-    plot_losses(epochs, [persistent_losses, adamw_losses], ['PersistentSGD', 'AdamW'], 'Training Loss Comparison')
+        train_loss_adamw = train(model_adamw, device, train_loader, optimizer_adamw, epoch)
+        val_loss_adamw, _ = validate(model_adamw, device, val_loader)
+
+        persistent_train_losses.append(train_loss_persistent)
+        persistent_val_losses.append(val_loss_persistent)
+
+        adamw_train_losses.append(train_loss_adamw)
+        adamw_val_losses.append(val_loss_adamw)
+
+    # Plot the training and validation loss curves for comparison
+    plot_losses(epochs, [persistent_train_losses, adamw_train_losses],
+                [persistent_val_losses, adamw_val_losses], ['PersistentSGD', 'AdamW'], 'Training & Validation Loss Comparison')
 
     # Test the models and output results
     print("Testing PersistentSGD Model")
