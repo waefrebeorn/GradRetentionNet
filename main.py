@@ -12,19 +12,13 @@ class EphemeralSGD(optim.Optimizer):
         super(EphemeralSGD, self).__init__(params, defaults)
 
     def step(self, closure=None):
-        """Performs a single ephemeral optimization step (does not permanently update weights)."""
+        """Performs a single ephemeral optimization step without permanently updating weights."""
         loss = None
         if closure is not None:
             loss = closure()
 
         # Save the original state of the parameters
-        original_params = []
-        for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                # Store a copy of the original parameter state
-                original_params.append(p.data.clone())
+        original_params = [p.data.clone() for group in self.param_groups for p in group['params'] if p.grad is not None]
 
         # Apply temporary updates using ephemeral gradients
         for group in self.param_groups:
@@ -42,7 +36,7 @@ class EphemeralSGD(optim.Optimizer):
                 persistent_grad.mul_(decay).add_(p.grad.data)
 
                 # Apply temporary update using persistent gradients
-                p.data.add_(-group['lr'], persistent_grad)
+                p.data.add_(persistent_grad, alpha=-group['lr'])
 
         # Calculate the temporary loss and revert to the original parameter state
         loss = closure() if closure is not None else None
@@ -52,7 +46,7 @@ class EphemeralSGD(optim.Optimizer):
         return loss
 
 
-# Simple neural network model
+# Simple neural network model for MNIST
 class SimpleNet(nn.Module):
     def __init__(self):
         super(SimpleNet, self).__init__()
@@ -92,7 +86,7 @@ def train_ephemeral(model, device, train_loader, optimizer, epoch, log_interval=
     return epoch_loss / len(train_loader)
 
 
-# Standard training function
+# Standard training function for other optimizers
 def train_standard(model, device, train_loader, optimizer, epoch, log_interval=100):
     model.train()
     criterion = nn.CrossEntropyLoss()
@@ -111,7 +105,7 @@ def train_standard(model, device, train_loader, optimizer, epoch, log_interval=1
     return epoch_loss / len(train_loader)
 
 
-# Validation function
+# Validation function to assess model performance
 def validate(model, device, val_loader):
     model.eval()
     val_loss = 0
@@ -132,7 +126,7 @@ def validate(model, device, val_loader):
     return val_loss, accuracy
 
 
-# Testing function
+# Testing function to measure model accuracy on the test set
 def test(model, device, test_loader):
     model.eval()
     test_loss = 0
@@ -153,7 +147,7 @@ def test(model, device, test_loader):
     return test_loss, accuracy
 
 
-# Plotting function for training and validation losses
+# Plotting function to visualize training and validation loss
 def plot_losses(epochs, train_losses, val_losses, labels, title):
     """Plot the training and validation loss for different optimizers."""
     for i, loss in enumerate(train_losses):
@@ -168,7 +162,7 @@ def plot_losses(epochs, train_losses, val_losses, labels, title):
     plt.show()
 
 
-# Main script for comprehensive testing and graphing
+# Main script for comprehensive testing and comparison
 def main():
     # Hyperparameters and setup
     batch_size = 64
@@ -188,8 +182,7 @@ def main():
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1000, shuffle=False)
-    test_loader = DataLoader(datasets.MNIST('./data', train=False, transform=transform),
-                             batch_size=1000, shuffle=False)
+    test_loader = DataLoader(datasets.MNIST('./data', train=False, transform=transform), batch_size=1000, shuffle=False)
 
     # Initialize models and optimizers
     model_ephemeral = SimpleNet().to(device)
@@ -225,7 +218,7 @@ def main():
         sgd_train_losses.append(sgd_train_loss)
         sgd_val_losses.append(val_loss_sgd)
 
-    # Plot the training and validation loss curves for comparison
+    # Plot the training and validation loss curves for all optimizers
     plot_losses(epochs, [ephemeral_train_losses, adamw_train_losses, sgd_train_losses],
                 [ephemeral_val_losses, adamw_val_losses, sgd_val_losses],
                 ['EphemeralSGD', 'AdamW', 'SGD'], 'Training & Validation Loss Comparison for Multiple Optimizers')
