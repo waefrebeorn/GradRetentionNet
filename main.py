@@ -71,7 +71,7 @@ class RescaledSGD(optim.Optimizer):
                 # Here, we consider persistent_grad as the update
                 if persistent_grad.abs().max() != 0 and persistent_grad.abs().min() != 0:
                     scaling = (persistent_grad.abs() - persistent_grad.abs().min()) / (
-                        persistent_grad.abs().max() - persistent_grad.abs().min()
+                        persistent_grad.abs().max() - persistent_grad.abs().min() + 1e-8
                     )
                     scaled_lr = base_lr + (peak_lr - base_lr) * scaling
                     scaled_grad = scaled_lr * persistent_grad.sign()
@@ -210,14 +210,14 @@ class ParameterPlotApp:
             width = 0.35
 
             # Current parameters
-            ax.bar(x - width/2, self.parameters[opt], width, label='Current', color='skyblue')
+            ax.bar(x - width / 2, self.parameters[opt], width, label='Current', color='skyblue')
             # Updated parameters
-            ax.bar(x + width/2, updated_parameters, width, label='Updated', color='lightgreen')
+            ax.bar(x + width / 2, updated_parameters, width, label='Updated', color='lightgreen')
 
             # Arrows indicating parameter changes
             for i, (current, updated) in enumerate(zip(self.parameters[opt], updated_parameters)):
-                ax.arrow(i, current, 0, updated - current, color='red', width=0.01,
-                         head_width=0.1, head_length=0.1 * self.y_range_multiplier * VALUE_RANGE)
+                ax.arrow(i, current, 0, updated - current, color='red', width=0.005,
+                         head_width=0.02, head_length=0.01 * self.y_range_multiplier * VALUE_RANGE)
 
             ax.axhline(y=0, color='r', linestyle='-', linewidth=0.5)
             ax.set_xlabel('Parameter Index')
@@ -244,8 +244,9 @@ class ParameterPlotApp:
             gradients (np.ndarray): Current gradient values.
         """
         if optimizer_name in self.optimizers:
-            self.parameters[optimizer_name] = parameters
-            self.gradients[optimizer_name] = gradients
+            # Ensure we only take the first NUM_PARAMS for visualization
+            self.parameters[optimizer_name] = parameters[:NUM_PARAMS]
+            self.gradients[optimizer_name] = gradients[:NUM_PARAMS]
             self.update_plot()
 
 
@@ -420,8 +421,17 @@ def main():
     def handle_queue():
         try:
             while not data_queue.empty():
-                optimizer_name, params, grads = data_queue.get_nowait()
-                app.update_parameters(optimizer_name, params, grads)
+                item = data_queue.get_nowait()
+                if item[0] == 'plot_losses':
+                    _, epochs_, rescaled_train, standard_train, rescaled_val, standard_val = item
+                    plot_losses(epochs_,
+                                [rescaled_train, standard_train],
+                                [rescaled_val, standard_val],
+                                ['RescaledSGD', 'StandardSGD'],
+                                'Training & Validation Loss Comparison')
+                else:
+                    optimizer_name, params, grads = item
+                    app.update_parameters(optimizer_name, params, grads)
         except queue.Empty:
             pass
         # Schedule the next queue check
@@ -447,12 +457,10 @@ def main():
             standard_sgd_train_losses.append(standard_train_loss)
             standard_sgd_val_losses.append(standard_val_loss)
 
-        # After training, plot the losses
-        plot_losses(epochs,
-                    [rescaled_sgd_train_losses, standard_sgd_train_losses],
-                    [rescaled_sgd_val_losses, standard_sgd_val_losses],
-                    ['RescaledSGD', 'StandardSGD'],
-                    'Training & Validation Loss Comparison')
+        # After training, send a message to plot the losses
+        data_queue.put(('plot_losses', epochs,
+                       rescaled_sgd_train_losses, standard_sgd_train_losses,
+                       rescaled_sgd_val_losses, standard_sgd_val_losses))
 
         # Test the models and output results
         print("Testing RescaledSGD Model")
