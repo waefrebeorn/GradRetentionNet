@@ -98,8 +98,8 @@ The **RescaledSGD** optimizer is the core innovation of this project, embodying 
 
 In 10 Epoch experiments conducted on the MNIST dataset, **RescaledSGD** significantly outperformed **StandardSGD**:
 
-- **Validation Accuracy**: Achieved up to 92% accuracy with **RescaledSGD**, compared to 53% with **StandardSGD**.
-- **Test Accuracy**: Reached 92% on the test set using **RescaledSGD**, whereas **StandardSGD** only achieved 54%.
+- **Validation Accuracy**: Achieved up to 92% accuracy with **RescaledSGD**, compared to 70% with **StandardSGD**.
+- **Test Accuracy**: Reached 92% on the test set using **RescaledSGD**, whereas **StandardSGD** only achieved 70%.
 - **Loss Metrics**: Consistently lower validation and test loss values with **RescaledSGD**, indicating better model performance and generalization.
 
 These results underscore the effectiveness of the gradient retention and dynamic learning rate scaling mechanisms in **RescaledSGD**.
