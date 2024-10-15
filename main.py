@@ -68,7 +68,6 @@ class RescaledSGD(optim.Optimizer):
                 persistent_grad.mul_(decay).add_(p.grad.data)
 
                 # Compute scaling factors based on min and max parameter updates
-                # Here, we consider persistent_grad as the update
                 if persistent_grad.abs().max() != 0 and persistent_grad.abs().min() != 0:
                     scaling = (persistent_grad.abs() - persistent_grad.abs().min()) / (
                         persistent_grad.abs().max() - persistent_grad.abs().min() + 1e-8
@@ -76,8 +75,8 @@ class RescaledSGD(optim.Optimizer):
                     scaled_lr = base_lr + (peak_lr - base_lr) * scaling
                     scaled_grad = scaled_lr * persistent_grad.sign()
                 else:
-                    scaled_grad = persistent_grad * (base_lr if persistent_grad.abs().max() == 0 else peak_lr)
                     scaled_lr = base_lr if persistent_grad.abs().max() == 0 else peak_lr
+                    scaled_grad = persistent_grad * scaled_lr
 
                 # Store the effective learning rates for visualization
                 if 'effective_lr' not in state:
@@ -297,8 +296,8 @@ def train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interv
     return epoch_loss / len(train_loader)
 
 
-# Standard training function for SGD
-def train_standard_sgd(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
+# Training function for SGD with Momentum
+def train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
     model.train()
     criterion = nn.CrossEntropyLoss()
     epoch_loss = 0
@@ -319,8 +318,38 @@ def train_standard_sgd(model, device, train_loader, optimizer, epoch, log_interv
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                # Effective learning rates are fixed for standard SGD (constant)
+                # Effective learning rates are fixed for SGD with Momentum (constant)
                 effective_lr = np.full(NUM_PARAMS, optimizer.param_groups[0]['lr'])
+            gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
+
+    return epoch_loss / len(train_loader)
+
+
+# Training function for AdamW
+def train_adamw(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    epoch_loss = 0
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()  # Clear existing gradients
+        output = model(data)  # Forward pass
+        loss = criterion(output, target)  # Calculate loss
+        loss.backward()  # Backpropagation
+        optimizer.step()  # Optimize
+        epoch_loss += loss.item()
+        if batch_idx % log_interval == 0:
+            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
+                  f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
+
+        # Optionally, send parameter updates to GUI
+        if gui_queue:
+            with torch.no_grad():
+                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                # AdamW has adaptive learning rates; approximate by using the current learning rate
+                # This is a simplification; for true per-parameter learning rates, more detailed tracking is needed
+                effective_lr = np.array([group['lr'] for group in optimizer.param_groups] * NUM_PARAMS)[:NUM_PARAMS]
             gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
     return epoch_loss / len(train_loader)
@@ -391,7 +420,10 @@ def main():
     epochs = 10
     base_lr_rescaled_sgd = 1e-7
     peak_lr_rescaled_sgd = 1e-4
-    peak_lr_standard_sgd = 1e-4
+    lr_sgd = 1e-4
+    momentum = 0.9
+    lr_adamw = 1e-3
+    weight_decay_adamw = 1e-2
     decay = 0.99
     log_interval = 100
     use_cuda = torch.cuda.is_available()
@@ -414,23 +446,40 @@ def main():
     test_loader = DataLoader(datasets.MNIST('./data', train=False, transform=transform), batch_size=1000, shuffle=False)
 
     # Initialize models and optimizers
-    model_rescaled_sgd = SimpleNet().to(device)
-    model_standard_sgd = SimpleNet().to(device)
-
-    optimizer_rescaled_sgd = RescaledSGD(model_rescaled_sgd.parameters(),
-                                         base_lr=base_lr_rescaled_sgd,
-                                         peak_lr=peak_lr_rescaled_sgd,
-                                         decay=decay)
-    optimizer_standard_sgd = optim.SGD(model_standard_sgd.parameters(),
-                                      lr=peak_lr_standard_sgd)
+    optimizers_config = {
+        'RescaledSGD': {
+            'model': SimpleNet().to(device),
+            'optimizer': RescaledSGD(SimpleNet().parameters(),
+                                     base_lr=base_lr_rescaled_sgd,
+                                     peak_lr=peak_lr_rescaled_sgd,
+                                     decay=decay)
+        },
+        'StandardSGD': {
+            'model': SimpleNet().to(device),
+            'optimizer': optim.SGD(SimpleNet().parameters(),
+                                   lr=lr_sgd)
+        },
+        'SGD_Momentum': {
+            'model': SimpleNet().to(device),
+            'optimizer': optim.SGD(SimpleNet().parameters(),
+                                   lr=lr_sgd,
+                                   momentum=momentum)
+        },
+        'AdamW': {
+            'model': SimpleNet().to(device),
+            'optimizer': optim.AdamW(SimpleNet().parameters(),
+                                     lr=lr_adamw,
+                                     weight_decay=weight_decay_adamw)
+        }
+    }
 
     # Track losses for plotting
-    rescaled_sgd_train_losses, rescaled_sgd_val_losses = [], []
-    standard_sgd_train_losses, standard_sgd_val_losses = [], []
+    train_losses = {opt: [] for opt in optimizers_config.keys()}
+    val_losses = {opt: [] for opt in optimizers_config.keys()}
 
-    # Initialize GUI with both optimizers
+    # Initialize GUI with all optimizers
     root = tk.Tk()
-    app = ParameterPlotApp(root, optimizers=['RescaledSGD', 'StandardSGD'])
+    app = ParameterPlotApp(root, optimizers=list(optimizers_config.keys()))
 
     # Function to handle incoming data from the training thread
     def handle_queue():
@@ -438,11 +487,14 @@ def main():
             while not data_queue.empty():
                 item = data_queue.get_nowait()
                 if item[0] == 'plot_losses':
-                    _, epochs_, rescaled_train, standard_train, rescaled_val, standard_val = item
+                    _, epochs_, train_loss_data, val_loss_data, labels = item
+                    # Reorganize loss data
+                    train_losses_list = [train_loss_data[opt] for opt in optimizers_config.keys()]
+                    val_losses_list = [val_loss_data[opt] for opt in optimizers_config.keys()]
                     plot_losses(epochs_,
-                                [rescaled_train, standard_train],
-                                [rescaled_val, standard_val],
-                                ['RescaledSGD', 'StandardSGD'],
+                                train_losses_list,
+                                val_losses_list,
+                                labels,
                                 'Training & Validation Loss Comparison')
                 else:
                     optimizer_name, params, grads, effective_lr = item
@@ -460,28 +512,38 @@ def main():
         for epoch in range(1, epochs + 1):
             print(f"--- Epoch {epoch} ---")
 
-            # Train RescaledSGD
-            rescaled_train_loss = train_rescaled_sgd(model_rescaled_sgd, device, train_loader, optimizer_rescaled_sgd, epoch, log_interval, gui_queue=data_queue)
-            rescaled_val_loss, rescaled_val_acc = validate(model_rescaled_sgd, device, val_loader)
-            rescaled_sgd_train_losses.append(rescaled_train_loss)
-            rescaled_sgd_val_losses.append(rescaled_val_loss)
+            # Train each optimizer
+            for opt_name, config in optimizers_config.items():
+                model = config['model']
+                optimizer = config['optimizer']
 
-            # Train Standard SGD
-            standard_train_loss = train_standard_sgd(model_standard_sgd, device, train_loader, optimizer_standard_sgd, epoch, log_interval, gui_queue=data_queue)
-            standard_val_loss, standard_val_acc = validate(model_standard_sgd, device, val_loader)
-            standard_sgd_train_losses.append(standard_train_loss)
-            standard_sgd_val_losses.append(standard_val_loss)
+                if opt_name == 'RescaledSGD':
+                    train_loss = train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
+                elif opt_name == 'StandardSGD':
+                    train_loss = train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
+                elif opt_name == 'SGD_Momentum':
+                    train_loss = train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
+                elif opt_name == 'AdamW':
+                    train_loss = train_adamw(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
+                else:
+                    continue  # Unknown optimizer
+
+                train_losses[opt_name].append(train_loss)
+                val_loss, val_acc = validate(model, device, val_loader)
+                val_losses[opt_name].append(val_loss)
+
+            # After training all optimizers for this epoch, continue to next epoch
 
         # After training, send a message to plot the losses
         data_queue.put(('plot_losses', epochs,
-                       rescaled_sgd_train_losses, standard_sgd_train_losses,
-                       rescaled_sgd_val_losses, standard_sgd_val_losses))
+                       train_losses, val_losses,
+                       list(optimizers_config.keys())))
 
         # Test the models and output results
-        print("Testing RescaledSGD Model")
-        test(model_rescaled_sgd, device, test_loader)
-        print("Testing StandardSGD Model")
-        test(model_standard_sgd, device, test_loader)
+        for opt_name, config in optimizers_config.items():
+            model = config['model']
+            print(f"Testing {opt_name} Model")
+            test(model, device, test_loader)
 
     # Start the training thread
     training_thread = threading.Thread(target=training_loop)
