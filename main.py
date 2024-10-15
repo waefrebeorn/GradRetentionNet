@@ -77,6 +77,12 @@ class RescaledSGD(optim.Optimizer):
                     scaled_grad = scaled_lr * persistent_grad.sign()
                 else:
                     scaled_grad = persistent_grad * (base_lr if persistent_grad.abs().max() == 0 else peak_lr)
+                    scaled_lr = base_lr if persistent_grad.abs().max() == 0 else peak_lr
+
+                # Store the effective learning rates for visualization
+                if 'effective_lr' not in state:
+                    state['effective_lr'] = torch.zeros_like(p.data)
+                state['effective_lr'].copy_(scaled_lr)
 
                 # Update parameters
                 p.data.add_(scaled_grad, alpha=-1)
@@ -108,9 +114,10 @@ class ParameterPlotApp:
         self.optimizers = optimizers  # List of optimizer names
         self.num_optimizers = len(optimizers)
 
-        # Initialize parameter and gradient storage for each optimizer
+        # Initialize parameter, gradient, and learning rate storage for each optimizer
         self.parameters = {opt: np.random.uniform(-VALUE_RANGE, VALUE_RANGE, NUM_PARAMS) for opt in optimizers}
         self.gradients = {opt: np.random.uniform(-1, 1, NUM_PARAMS) for opt in optimizers}
+        self.learning_rates = {opt: np.zeros(NUM_PARAMS) for opt in optimizers}
         self.y_range_multiplier = Y_RANGE_MULTIPLIER
 
         # Create notebook for tabs
@@ -181,12 +188,12 @@ class ParameterPlotApp:
     def apply_learning_rate(self, gradients, learning_rate):
         base_lr = float(self.base_lr_entry.get())
         if not self.retain_min_var.get() or learning_rate <= base_lr:
-            return learning_rate * gradients
+            return learning_rate * gradients, np.full_like(gradients, learning_rate)
 
         abs_gradients = np.abs(gradients)
         scaled_gradients = (abs_gradients - abs_gradients.min()) / (abs_gradients.max() - abs_gradients.min() + 1e-8)  # Avoid division by zero
         adjusted_lr = base_lr + (learning_rate - base_lr) * scaled_gradients
-        return adjusted_lr * gradients
+        return adjusted_lr * gradients, adjusted_lr
 
     def update_y_range(self):
         try:
@@ -201,7 +208,7 @@ class ParameterPlotApp:
 
         # Iterate through each optimizer and update its plot
         for opt in self.optimizers:
-            parameter_changes = self.apply_learning_rate(self.gradients[opt], learning_rate)
+            parameter_changes, effective_lr = self.apply_learning_rate(self.gradients[opt], learning_rate)
             updated_parameters = self.parameters[opt] + parameter_changes
 
             ax = self.axes[opt]
@@ -213,6 +220,8 @@ class ParameterPlotApp:
             ax.bar(x - width / 2, self.parameters[opt], width, label='Current', color='skyblue')
             # Updated parameters
             ax.bar(x + width / 2, updated_parameters, width, label='Updated', color='lightgreen')
+            # Plot effective learning rates as a line
+            ax.plot(x, effective_lr, label='Effective LR', color='orange', marker='o', linestyle='dashed')
 
             # Arrows indicating parameter changes
             for i, (current, updated) in enumerate(zip(self.parameters[opt], updated_parameters)):
@@ -221,7 +230,7 @@ class ParameterPlotApp:
 
             ax.axhline(y=0, color='r', linestyle='-', linewidth=0.5)
             ax.set_xlabel('Parameter Index')
-            ax.set_ylabel('Value')
+            ax.set_ylabel('Value / Effective LR')
             ax.set_title(f'{opt} Parameter Changes (LR: {learning_rate:.2e})')
             ax.set_ylim(-VALUE_RANGE * self.y_range_multiplier, VALUE_RANGE * self.y_range_multiplier)
             ax.legend()
@@ -234,19 +243,21 @@ class ParameterPlotApp:
         for opt in self.optimizers:
             self.update_plot()
 
-    def update_parameters(self, optimizer_name, parameters, gradients):
+    def update_parameters(self, optimizer_name, parameters, gradients, effective_lr):
         """
-        Receives updated parameters and gradients from the training loop and updates the plot.
+        Receives updated parameters, gradients, and effective learning rates from the training loop.
 
         Args:
             optimizer_name (str): Name of the optimizer.
             parameters (np.ndarray): Current parameter values.
             gradients (np.ndarray): Current gradient values.
+            effective_lr (np.ndarray): Effective learning rates applied to the parameters.
         """
         if optimizer_name in self.optimizers:
             # Ensure we only take the first NUM_PARAMS for visualization
             self.parameters[optimizer_name] = parameters[:NUM_PARAMS]
             self.gradients[optimizer_name] = gradients[:NUM_PARAMS]
+            self.learning_rates[optimizer_name] = effective_lr[:NUM_PARAMS]
             self.update_plot()
 
 
@@ -279,7 +290,9 @@ def train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interv
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-            gui_queue.put((optimizer.__class__.__name__, params, grads))
+                # Extract effective learning rates
+                effective_lr = optimizer.state[model.fc1.weight]['effective_lr'].cpu().numpy().flatten()[:NUM_PARAMS]
+            gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
     return epoch_loss / len(train_loader)
 
@@ -306,7 +319,9 @@ def train_standard_sgd(model, device, train_loader, optimizer, epoch, log_interv
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-            gui_queue.put((optimizer.__class__.__name__, params, grads))
+                # Effective learning rates are fixed for standard SGD (constant)
+                effective_lr = np.full(NUM_PARAMS, optimizer.param_groups[0]['lr'])
+            gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
     return epoch_loss / len(train_loader)
 
@@ -430,8 +445,8 @@ def main():
                                 ['RescaledSGD', 'StandardSGD'],
                                 'Training & Validation Loss Comparison')
                 else:
-                    optimizer_name, params, grads = item
-                    app.update_parameters(optimizer_name, params, grads)
+                    optimizer_name, params, grads, effective_lr = item
+                    app.update_parameters(optimizer_name, params, grads, effective_lr)
         except queue.Empty:
             pass
         # Schedule the next queue check

@@ -1,86 +1,110 @@
-# GradRetentionNet: Exploring Persistent Gradient Descent for Global Optimization
+# RescaledSGD vs. StandardSGD: MNIST Training with Real-Time Visualization
 
-## Overview
-**GradRetentionNet** is a research project focused on exploring the concept of *Persistent Gradient Descent (PGD)* and comparing its performance with standard optimizers like `AdamW` and custom variants such as `AdEMA`. The primary goal is to implement, analyze, and understand the effectiveness of *retaining gradients across iterations* and its impact on global convergence in neural networks.
+![Project Banner](https://github.com/yourusername/your-repo/blob/main/banner.png)
 
-The project implements and tests Kalomaze's idea of *never fully clearing gradients*, allowing for a form of momentum that adapts more globally rather than being biased by recent gradient information.
+## Table of Contents
+- [Introduction](#introduction)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Visualization](#visualization)
+- [Credits](#credits)
+- [License](#license)
 
-## Project Structure
-```
-GradRetentionNet/
-├── main.py               # Main training and testing script with comparison and graphing
-├── setup.bat             # Environment setup script
-├── run.bat               # Run script to activate environment and execute the project
-├── requirements.txt      # Dependencies file
-├── .gitignore            # Git ignore file to exclude unnecessary files
-├── README.md             # Project documentation and guidelines
-└── data/                 # Folder for datasets (excluded in .gitignore)
-```
+## Introduction
 
-## Optimizers Implemented
-### 1. PersistentSGD
-The `PersistentSGD` optimizer maintains a state of *persistent gradients* across iterations. Instead of zeroing gradients after each step, it accumulates them using a decaying multiplier. This technique allows the optimizer to adapt more globally, potentially leading to better convergence in complex loss landscapes.
+Welcome to the **RescaledSGD vs. StandardSGD** project! This project demonstrates the implementation and comparison of a custom optimizer, **RescaledSGD**, against the standard **SGD** optimizer in training a simple neural network on the MNIST dataset. Additionally, it provides a real-time graphical user interface (GUI) to visualize parameter updates, gradients, and effective learning rates during training.
 
-### 2. AdEMA
-`AdEMA` is a custom variant of Adam that uses Exponential Moving Average (EMA) to track gradients with an adjustable decay. This helps reduce oscillations and improve generalization.
+## Features
 
-### 3. AdamW
-`AdamW` serves as a baseline adaptive optimizer with weight decay and momentum, focusing on local gradient information.
+- **Custom Optimizer (`RescaledSGD`)**: Dynamically adjusts learning rates based on gradient magnitudes, aiming for more effective and stable training.
+- **Standard Optimizer (`SGD`)**: Serves as a baseline for comparison with a fixed learning rate.
+- **Real-Time Visualization**: Utilizes Tkinter and Matplotlib to display parameter values, gradients, and effective learning rates in real-time.
+- **Multi-Threaded Training**: Ensures the GUI remains responsive by running the training process in a separate thread.
+- **User Controls**: Interactive sliders and input fields allow users to adjust learning rates and visualization parameters on the fly.
 
 ## Installation
+
+### Prerequisites
+
+Ensure you have Python 3.6 or later installed. It's recommended to use a virtual environment to manage dependencies.
+
+### Steps
+
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/waefrebeorn/GradRetentionNet.git
-   cd GradRetentionNet
+   git clone https://github.com/yourusername/your-repo.git
+   cd your-repo
    ```
 
-2. **Set Up the Environment**
-   Run the `setup.bat` script to create a virtual environment, install dependencies, and download the MNIST dataset.
+2. **Create and Activate a Virtual Environment**
    ```bash
-   setup.bat
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
-3. **Running the Project**
-   Use the `run.bat` script to run the `main.py` file.
+3. **Install Dependencies**
    ```bash
-   run.bat
+   pip install -r requirements.txt
    ```
+
+   *If you don't have a `requirements.txt`, you can install the necessary packages individually:*
+   ```bash
+   pip install torch torchvision matplotlib
+   ```
+
+   > **Note:** `tkinter` is usually included with Python installations. If it's missing, refer to your operating system's instructions to install it.
 
 ## Usage
-1. **Modify Parameters**:
-   You can customize learning rates, decay factors, and model configurations directly in the `main.py` script.
-   
-2. **Adding New Optimizers**:
-   To add new optimizers, implement a new optimizer class in `main.py` following the pattern of `PersistentSGD` and `AdEMA`.
 
-3. **View Results**:
-   The script generates training loss curves comparing different optimizers and outputs test accuracy for each configuration.
+1. **Activate the Virtual Environment**
+   ```bash
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-## Results
-The project includes comparison graphs between `PersistentSGD`, `AdamW`, and `AdEMA`, showing the impact of retaining gradient history on loss convergence. Below is a sample graph generated by the project (if applicable):
+2. **Run the Script**
+   ```bash
+   python main.py
+   ```
 
-![Training Loss Comparison](images/loss_comparison.png)
+   This will launch the GUI and start the training process in the background. You will see real-time updates of parameter changes, gradients, and effective learning rates for both `RescaledSGD` and `StandardSGD` optimizers.
 
-## Research Background
-The concept of **Persistent Gradient Descent** (PGD) was inspired by discussions in machine learning forums, where researchers hypothesized that retaining gradient memory could lead to better global convergence. This project implements the idea in a concrete manner and compares it against traditional optimizers to test its effectiveness in practice.
+## Visualization
 
-### Key Concepts:
-1. **Persistent Gradient Accumulation**: Keeping a fraction of the past gradients to avoid overfitting to recent information.
-2. **Global Adaptation**: Using a decaying memory of gradients to adjust parameters more globally.
-3. **Comparison to AdamW**: Highlighting differences between localized and global adaptations in complex loss surfaces.
+The GUI provides a comprehensive view of the training dynamics:
 
-## Future Work
-1. **Dynamic Decay Scheduling**: Implementing learnable decay factors to adjust memory retention dynamically during training.
-2. **Extended Optimizer Configurations**: Testing a wider range of configurations on deeper architectures.
-3. **Real-World Applications**: Applying PersistentSGD and its variants to real-world datasets like CIFAR-10 and ImageNet.
+- **Tabs for Each Optimizer**: Switch between `RescaledSGD` and `StandardSGD` to observe their behaviors.
+- **Parameter Bars**: Blue bars represent current parameter values, while green bars show updated values after applying gradients.
+- **Effective Learning Rates**: Dashed orange lines indicate the learning rates applied to each parameter.
+- **Arrows**: Red arrows illustrate the direction and magnitude of parameter updates.
+- **Controls**:
+  - **Learning Rate Slider**: Adjust the effective learning rate manually.
+  - **Retain Minimum Scaling**: Toggle whether to retain minimum scaling in learning rate adjustments.
+  - **Base Learning Rate Input**: Set the base learning rate for `RescaledSGD`.
+  - **Y-Range Multiplier Input**: Modify the Y-axis scaling for better visualization.
 
-## Contributing
-If you'd like to contribute, feel free to open a pull request. Contributions are welcome for new optimizers, visualization tools, or bug fixes.
+After training completes, a separate plot displays the training and validation losses for both optimizers across all epochs, allowing for an in-depth comparison of their performances.
+
+## Credits
+
+- **WuBu WaefreBeorn**: Lead Developer, Implemented and Bug-Fixed the Project.
+- **Kalomaze**: Conceptual Contributor, Provided General Ideas and Guidance.
+- **OpenAI ChatGPT**: Assisted in Code Generation and Implementation Strategies.
+
+A special thanks to both WuBu WaefreBeorn and Kalomaze for their collaboration and dedication to making this project successful.
 
 ## License
-This project is licensed under the MIT License.
 
-## Contact
-For further discussions, feel free to reach out through GitHub at [waefrebeorn](https://github.com/waefrebeorn).
+This project is licensed under the [MIT License](LICENSE).
 
+---
+
+*Feel free to contribute, report issues, or suggest improvements!*
+
+# Acknowledgements
+
+- **OpenAI** for providing the powerful language model, ChatGPT, which assisted in generating and refining the code.
+- The **PyTorch** and **Matplotlib** communities for their excellent libraries and documentation.
+
+---
 
