@@ -7,12 +7,60 @@ import matplotlib.pyplot as plt
 
 # Custom optimizer with ephemeral gradient application based on Kalomaze's idea
 class EphemeralSGD(optim.Optimizer):
-    def __init__(self, params, lr=0.01, decay=0.99):
-        defaults = dict(lr=lr, decay=decay)
+    def __init__(self, params, lr=0.01, decay=0.99, new_min=0.1, new_max=10.0):
+        """
+        Initializes the EphemeralSGD optimizer.
+
+        Args:
+            params (iterable): Iterable of parameters to optimize.
+            lr (float): Learning rate.
+            decay (float): Decay factor for persistent gradients.
+            new_min (float): New minimum gradient magnitude after rescaling.
+            new_max (float): New maximum gradient magnitude after rescaling.
+        """
+        defaults = dict(lr=lr, decay=decay, new_min=new_min, new_max=new_max)
         super(EphemeralSGD, self).__init__(params, defaults)
 
+    def rescale_gradients(self, grad, new_min, new_max):
+        """
+        Rescales gradients to compress the range of magnitudes.
+
+        Args:
+            grad (torch.Tensor): Gradient tensor.
+            new_min (float): Desired minimum gradient magnitude.
+            new_max (float): Desired maximum gradient magnitude.
+
+        Returns:
+            torch.Tensor: Rescaled gradient tensor.
+        """
+        # Compute absolute gradients
+        abs_grad = grad.abs()
+        min_grad = abs_grad.min()
+        max_grad = abs_grad.max()
+
+        # Avoid division by zero
+        if max_grad == min_grad:
+            return grad
+
+        # Rescale using min-max normalization to the desired range
+        scaled_grad = (abs_grad - min_grad) / (max_grad - min_grad)  # Normalize to [0, 1]
+        scaled_grad = scaled_grad * (new_max - new_min) + new_min      # Scale to [new_min, new_max]
+
+        # Preserve the sign of the original gradient
+        rescaled_grad = scaled_grad * grad.sign()
+
+        return rescaled_grad
+
     def step(self, closure=None):
-        """Performs a single optimization step with persistent updates."""
+        """
+        Performs a single optimization step with rescaled gradients.
+
+        Args:
+            closure (callable, optional): A closure that reevaluates the model and returns the loss.
+
+        Returns:
+            loss: The loss computed by the closure, if provided.
+        """
         loss = None
         if closure is not None:
             loss = closure()
@@ -20,9 +68,15 @@ class EphemeralSGD(optim.Optimizer):
         for group in self.param_groups:
             decay = group['decay']
             lr = group['lr']
+            new_min = group['new_min']
+            new_max = group['new_max']
+
             for p in group['params']:
                 if p.grad is None:
                     continue
+
+                # Rescale the gradient
+                rescaled_grad = self.rescale_gradients(p.grad.data, new_min, new_max)
 
                 # Initialize persistent gradient if not present
                 state = self.state[p]
@@ -31,14 +85,12 @@ class EphemeralSGD(optim.Optimizer):
 
                 # Update persistent gradient with decay
                 persistent_grad = state['persistent_grad']
-                persistent_grad.mul_(decay).add_(p.grad.data)
+                persistent_grad.mul_(decay).add_(rescaled_grad)
 
                 # Update parameters permanently
                 p.data.add_(persistent_grad, alpha=-lr)
 
         return loss
-
-
 
 # Simple neural network model for MNIST
 class SimpleNet(nn.Module):
@@ -52,7 +104,6 @@ class SimpleNet(nn.Module):
         x = torch.relu(self.fc1(x))  # Apply ReLU activation
         x = self.fc2(x)  # Output layer
         return x
-
 
 # Training function for ephemeral updates
 def train_ephemeral(model, device, train_loader, optimizer, epoch, log_interval=100):
@@ -79,7 +130,6 @@ def train_ephemeral(model, device, train_loader, optimizer, epoch, log_interval=
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
     return epoch_loss / len(train_loader)
 
-
 # Standard training function for other optimizers
 def train_standard(model, device, train_loader, optimizer, epoch, log_interval=100):
     model.train()
@@ -97,7 +147,6 @@ def train_standard(model, device, train_loader, optimizer, epoch, log_interval=1
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
     return epoch_loss / len(train_loader)
-
 
 # Validation function to assess model performance
 def validate(model, device, val_loader):
@@ -119,7 +168,6 @@ def validate(model, device, val_loader):
           f'({accuracy:.0f}%)\n')
     return val_loss, accuracy
 
-
 # Testing function to measure model accuracy on the test set
 def test(model, device, test_loader):
     model.eval()
@@ -140,7 +188,6 @@ def test(model, device, test_loader):
           f'({accuracy:.0f}%)\n')
     return test_loss, accuracy
 
-
 # Plotting function to visualize training and validation loss
 def plot_losses(epochs, train_losses, val_losses, labels, title):
     """Plot the training and validation loss for different optimizers."""
@@ -154,7 +201,6 @@ def plot_losses(epochs, train_losses, val_losses, labels, title):
     plt.legend()
     plt.grid(True)
     plt.show()
-
 
 # Main script for comprehensive testing and comparison
 def main():
@@ -183,7 +229,7 @@ def main():
     model_adamw = SimpleNet().to(device)
     model_sgd = SimpleNet().to(device)
 
-    optimizer_ephemeral = EphemeralSGD(model_ephemeral.parameters(), lr=learning_rate)
+    optimizer_ephemeral = EphemeralSGD(model_ephemeral.parameters(), lr=learning_rate, decay=0.99, new_min=0.1, new_max=10.0)
     optimizer_adamw = optim.AdamW(model_adamw.parameters(), lr=learning_rate)
     optimizer_sgd = optim.SGD(model_sgd.parameters(), lr=learning_rate)
 
@@ -194,15 +240,21 @@ def main():
 
     # Train and validate models for all epochs
     for epoch in range(1, epochs + 1):
+        print(f"--- Epoch {epoch} ---")
+        
+        # Train EphemeralSGD
         ephemeral_train_loss = train_ephemeral(model_ephemeral, device, train_loader, optimizer_ephemeral, epoch)
-        val_loss_ephemeral, _ = validate(model_ephemeral, device, val_loader)
+        val_loss_ephemeral, val_acc_ephemeral = validate(model_ephemeral, device, val_loader)
 
+        # Train AdamW
         adamw_train_loss = train_standard(model_adamw, device, train_loader, optimizer_adamw, epoch)
-        val_loss_adamw, _ = validate(model_adamw, device, val_loader)
+        val_loss_adamw, val_acc_adamw = validate(model_adamw, device, val_loader)
 
+        # Train SGD
         sgd_train_loss = train_standard(model_sgd, device, train_loader, optimizer_sgd, epoch)
-        val_loss_sgd, _ = validate(model_sgd, device, val_loader)
+        val_loss_sgd, val_acc_sgd = validate(model_sgd, device, val_loader)
 
+        # Append losses for plotting
         ephemeral_train_losses.append(ephemeral_train_loss)
         ephemeral_val_losses.append(val_loss_ephemeral)
 
@@ -224,7 +276,6 @@ def main():
     test(model_adamw, device, test_loader)
     print("Testing SGD Model")
     test(model_sgd, device, test_loader)
-
 
 if __name__ == '__main__':
     main()
