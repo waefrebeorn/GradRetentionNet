@@ -12,38 +12,32 @@ class EphemeralSGD(optim.Optimizer):
         super(EphemeralSGD, self).__init__(params, defaults)
 
     def step(self, closure=None):
-        """Performs a single ephemeral optimization step without permanently updating weights."""
+        """Performs a single optimization step with persistent updates."""
         loss = None
         if closure is not None:
             loss = closure()
 
-        # Save the original state of the parameters
-        original_params = [p.data.clone() for group in self.param_groups for p in group['params'] if p.grad is not None]
-
-        # Apply temporary updates using ephemeral gradients
         for group in self.param_groups:
             decay = group['decay']
-            for p, orig in zip(group['params'], original_params):
+            lr = group['lr']
+            for p in group['params']:
                 if p.grad is None:
                     continue
-                # Create state for persistent gradient if it doesn't exist
+
+                # Initialize persistent gradient if not present
                 state = self.state[p]
                 if 'persistent_grad' not in state:
                     state['persistent_grad'] = torch.zeros_like(p.data)
 
-                # Accumulate gradients using decay factor instead of zeroing out
+                # Update persistent gradient with decay
                 persistent_grad = state['persistent_grad']
                 persistent_grad.mul_(decay).add_(p.grad.data)
 
-                # Apply temporary update using persistent gradients
-                p.data.add_(persistent_grad, alpha=-group['lr'])
-
-        # Calculate the temporary loss and revert to the original parameter state
-        loss = closure() if closure is not None else None
-        for p, orig in zip([p for group in self.param_groups for p in group['params']], original_params):
-            p.data.copy_(orig)  # Revert the weights to the original state
+                # Update parameters permanently
+                p.data.add_(persistent_grad, alpha=-lr)
 
         return loss
+
 
 
 # Simple neural network model for MNIST
