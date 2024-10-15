@@ -289,11 +289,18 @@ def train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interv
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                # Extract effective learning rates
-                effective_lr = optimizer.state[model.fc1.weight]['effective_lr'].cpu().numpy().flatten()[:NUM_PARAMS]
+                
+                # Access 'effective_lr' if available, else use base_lr directly from the optimizer settings
+                base_lr = optimizer.param_groups[0]['base_lr']
+                effective_lr = optimizer.state[model.fc1.weight].get(
+                    'effective_lr',
+                    torch.full_like(model.fc1.weight.data, base_lr)  # Fallback to base_lr
+                ).cpu().numpy().flatten()[:NUM_PARAMS]
+                
             gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
     return epoch_loss / len(train_loader)
+
 
 
 # Training function for SGD with Momentum
