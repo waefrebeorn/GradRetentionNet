@@ -122,18 +122,36 @@ class SimpleNet(nn.Module):
 
 # GUI for parameter visualization
 class ParameterPlotApp:
-    def __init__(self, master):
+    def __init__(self, master, optimizers):
         self.master = master
-        master.title("Parameter Plot")
+        master.title("Optimizer Parameter Visualization")
 
-        self.parameters = np.random.uniform(-VALUE_RANGE, VALUE_RANGE, NUM_PARAMS)
-        self.gradients = np.random.uniform(-1, 1, NUM_PARAMS)
+        self.optimizers = optimizers  # List of optimizer names
+        self.num_optimizers = len(optimizers)
+
+        self.parameters = {opt: np.random.uniform(-VALUE_RANGE, VALUE_RANGE, NUM_PARAMS) for opt in optimizers}
+        self.gradients = {opt: np.random.uniform(-1, 1, NUM_PARAMS) for opt in optimizers}
         self.y_range_multiplier = Y_RANGE_MULTIPLIER
 
-        # Set up matplotlib figure and axis
-        self.fig, self.ax = plt.subplots(figsize=(12, 6))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=master)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(master)
+        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Dictionaries to hold figures and axes
+        self.figures = {}
+        self.axes = {}
+        self.canvases = {}
+
+        # Create a tab for each optimizer
+        for opt in optimizers:
+            frame = ttk.Frame(self.notebook)
+            self.notebook.add(frame, text=opt)
+            fig, ax = plt.subplots(figsize=(12, 6))
+            canvas = FigureCanvasTkAgg(fig, master=frame)
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+            self.figures[opt] = fig
+            self.axes[opt] = ax
+            self.canvases[opt] = canvas
 
         # Controls frame
         controls = ttk.Frame(master)
@@ -153,24 +171,24 @@ class ParameterPlotApp:
 
         # Base Learning Rate input
         base_lr_frame = ttk.Frame(controls)
-        base_lr_frame.pack(side=tk.TOP)
+        base_lr_frame.pack(side=tk.TOP, pady=5)
         ttk.Label(base_lr_frame, text="Base LR:").pack(side=tk.LEFT)
         self.base_lr_entry = ttk.Entry(base_lr_frame, width=10)
         self.base_lr_entry.insert(0, "1e-5")
         self.base_lr_entry.pack(side=tk.LEFT)
-        ttk.Button(base_lr_frame, text="Update", command=self.update_plot).pack(side=tk.LEFT)
+        ttk.Button(base_lr_frame, text="Update", command=self.update_plot).pack(side=tk.LEFT, padx=5)
 
         # Y-Range Multiplier input
         y_range_frame = ttk.Frame(controls)
-        y_range_frame.pack(side=tk.TOP)
+        y_range_frame.pack(side=tk.TOP, pady=5)
         ttk.Label(y_range_frame, text="Y-Range Multiplier:").pack(side=tk.LEFT)
         self.y_range_entry = ttk.Entry(y_range_frame, width=10)
         self.y_range_entry.insert(0, str(Y_RANGE_MULTIPLIER))
         self.y_range_entry.pack(side=tk.LEFT)
-        ttk.Button(y_range_frame, text="Update", command=self.update_y_range).pack(side=tk.LEFT)
+        ttk.Button(y_range_frame, text="Update", command=self.update_y_range).pack(side=tk.LEFT, padx=5)
 
-        # Initialize plot
-        self.update_plot()
+        # Initialize plots for each optimizer
+        self.update_all_plots()
 
     def get_learning_rate(self):
         try:
@@ -193,7 +211,7 @@ class ParameterPlotApp:
     def update_y_range(self):
         try:
             self.y_range_multiplier = float(self.y_range_entry.get())
-            self.update_plot()
+            self.update_all_plots()
         except ValueError:
             print("Invalid Y-Range Multiplier")
 
@@ -201,51 +219,60 @@ class ParameterPlotApp:
         learning_rate = self.get_learning_rate()
         self.lr_label.config(text=f"Effective Learning Rate: {learning_rate:.2e}")
 
-        # Apply learning rate to gradients
-        parameter_changes = self.apply_learning_rate(self.gradients, learning_rate)
-        updated_parameters = self.parameters + parameter_changes
+        # Iterate through each optimizer and update its plot
+        for opt in self.optimizers:
+            parameter_changes = self.apply_learning_rate(self.gradients[opt], learning_rate)
+            updated_parameters = self.parameters[opt] + parameter_changes
 
-        self.ax.clear()
-        x = np.arange(NUM_PARAMS)
-        width = 0.35
+            ax = self.axes[opt]
+            ax.clear()
+            x = np.arange(NUM_PARAMS)
+            width = 0.35
 
-        # Current parameters
-        self.ax.bar(x - width/2, self.parameters, width, label='Current', color='skyblue')
-        # Updated parameters
-        self.ax.bar(x + width/2, updated_parameters, width, label='Updated', color='lightgreen')
+            # Current parameters
+            ax.bar(x - width/2, self.parameters[opt], width, label='Current', color='skyblue')
+            # Updated parameters
+            ax.bar(x + width/2, updated_parameters, width, label='Updated', color='lightgreen')
 
-        # Arrows indicating parameter changes
-        for i, (current, updated) in enumerate(zip(self.parameters, updated_parameters)):
-            self.ax.arrow(i, current, 0, updated - current, color='red', width=0.01,
-                          head_width=0.1, head_length=0.1 * self.y_range_multiplier * VALUE_RANGE)
+            # Arrows indicating parameter changes
+            for i, (current, updated) in enumerate(zip(self.parameters[opt], updated_parameters)):
+                ax.arrow(i, current, 0, updated - current, color='red', width=0.01,
+                         head_width=0.1, head_length=0.1 * self.y_range_multiplier * VALUE_RANGE)
 
-        self.ax.axhline(y=0, color='r', linestyle='-', linewidth=0.5)
-        self.ax.set_xlabel('Parameter Index')
-        self.ax.set_ylabel('Value')
-        self.ax.set_title(f'Parameter Changes (LR: {learning_rate:.2e})')
-        self.ax.set_ylim(-VALUE_RANGE * self.y_range_multiplier, VALUE_RANGE * self.y_range_multiplier)
-        self.ax.legend()
-        self.ax.grid(axis='y', linestyle='--', alpha=0.7)
-        self.ax.set_xticks(x)
+            ax.axhline(y=0, color='r', linestyle='-', linewidth=0.5)
+            ax.set_xlabel('Parameter Index')
+            ax.set_ylabel('Value')
+            ax.set_title(f'{opt} Parameter Changes (LR: {learning_rate:.2e})')
+            ax.set_ylim(-VALUE_RANGE * self.y_range_multiplier, VALUE_RANGE * self.y_range_multiplier)
+            ax.legend()
+            ax.grid(axis='y', linestyle='--', alpha=0.7)
+            ax.set_xticks(x)
 
-        self.canvas.draw()
+            self.canvases[opt].draw()
 
-    def update_parameters(self, parameters, gradients):
+    def update_all_plots(self):
+        for opt in self.optimizers:
+            self.update_plot()
+
+    def update_parameters(self, optimizer_name, parameters, gradients):
         """
         Receives updated parameters and gradients from the training loop and updates the plot.
 
         Args:
+            optimizer_name (str): Name of the optimizer.
             parameters (np.ndarray): Current parameter values.
             gradients (np.ndarray): Current gradient values.
         """
-        self.parameters = parameters
-        self.gradients = gradients
-        self.update_plot()
+        if optimizer_name in self.optimizers:
+            self.parameters[optimizer_name] = parameters
+            self.gradients[optimizer_name] = gradients
+            self.update_plot()
 
 class ParameterVisualizer(threading.Thread):
-    def __init__(self, app):
+    def __init__(self, app, optimizer_name):
         super().__init__()
         self.app = app
+        self.optimizer_name = optimizer_name
         self.daemon = True  # Daemonize thread
 
     def run(self):
@@ -280,12 +307,12 @@ def train_ephemeral(model, device, train_loader, optimizer, epoch, log_interval=
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-            gui_queue.put((params, grads))
+            gui_queue.put((epoch, 'EphemeralSGD', params, grads))
 
     return epoch_loss / len(train_loader)
 
 # Standard training function for other optimizers
-def train_standard(model, device, train_loader, optimizer, epoch, log_interval=100):
+def train_standard(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
     model.train()
     criterion = nn.CrossEntropyLoss()
     epoch_loss = 0
@@ -300,6 +327,19 @@ def train_standard(model, device, train_loader, optimizer, epoch, log_interval=1
         if batch_idx % log_interval == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
+        
+        # Optionally, send parameter updates to GUI
+        if gui_queue and isinstance(optimizer, optim.AdamW):
+            with torch.no_grad():
+                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
+            gui_queue.put((epoch, 'AdamW', params, grads))
+        elif gui_queue and isinstance(optimizer, optim.SGD):
+            with torch.no_grad():
+                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
+            gui_queue.put((epoch, 'SGD', params, grads))
+
     return epoch_loss / len(train_loader)
 
 # Validation function to assess model performance
@@ -393,16 +433,16 @@ def main():
     adamw_train_losses, adamw_val_losses = [], []
     sgd_train_losses, sgd_val_losses = [], []
 
-    # Initialize GUI
+    # Initialize GUI with all optimizer names
     root = tk.Tk()
-    app = ParameterPlotApp(root)
+    app = ParameterPlotApp(root, optimizers=['EphemeralSGD', 'AdamW', 'SGD'])
 
     # Function to handle incoming data from the training thread
     def handle_queue():
         try:
             while not data_queue.empty():
-                params, grads = data_queue.get_nowait()
-                app.update_parameters(params, grads)
+                epoch, optimizer_name, params, grads = data_queue.get_nowait()
+                app.update_parameters(optimizer_name, params, grads)
         except queue.Empty:
             pass
         # Schedule the next queue check
@@ -421,11 +461,11 @@ def main():
             val_loss_ephemeral, val_acc_ephemeral = validate(model_ephemeral, device, val_loader)
 
             # Train AdamW
-            adamw_train_loss = train_standard(model_adamw, device, train_loader, optimizer_adamw, epoch)
+            adamw_train_loss = train_standard(model_adamw, device, train_loader, optimizer_adamw, epoch, gui_queue=data_queue)
             val_loss_adamw, val_acc_adamw = validate(model_adamw, device, val_loader)
 
             # Train SGD
-            sgd_train_loss = train_standard(model_sgd, device, train_loader, optimizer_sgd, epoch)
+            sgd_train_loss = train_standard(model_sgd, device, train_loader, optimizer_sgd, epoch, gui_queue=data_queue)
             val_loss_sgd, val_acc_sgd = validate(model_sgd, device, val_loader)
 
             # Append losses for plotting
