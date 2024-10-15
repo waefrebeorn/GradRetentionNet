@@ -1,6 +1,5 @@
 # RescaledSGD vs. StandardSGD: MNIST Training with Real-Time Visualization
 
-![Project Banner](https://github.com/yourusername/your-repo/blob/main/banner.png)
 
 ## Table of Contents
 - [Introduction](#introduction)
