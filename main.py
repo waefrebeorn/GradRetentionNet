@@ -10,7 +10,6 @@ from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import threading
 import queue
-import time
 
 # Constants
 NUM_PARAMS = 10  # Number of parameters to visualize
@@ -89,18 +88,16 @@ class RescaledSGD(optim.Optimizer):
         return loss
 
 
-# Simple neural network model for MNIST
 class SimpleNet(nn.Module):
     def __init__(self, num_params=NUM_PARAMS):
         super(SimpleNet, self).__init__()
-        # Adjusting the network to have NUM_PARAMS for visualization purposes
         self.fc1 = nn.Linear(28 * 28, num_params)
         self.fc2 = nn.Linear(num_params, 10)
 
     def forward(self, x):
-        x = x.view(-1, 28 * 28)  # Flatten the input tensor
-        x = torch.relu(self.fc1(x))  # Apply ReLU activation
-        x = self.fc2(x)  # Output layer
+        x = x.view(-1, 28 * 28)
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
         return x
 
 
@@ -289,21 +286,18 @@ def train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interv
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                
+
                 # Access 'effective_lr' if available, else use base_lr directly from the optimizer settings
-                base_lr = optimizer.param_groups[0]['base_lr']
-                effective_lr = optimizer.state[model.fc1.weight].get(
-                    'effective_lr',
-                    torch.full_like(model.fc1.weight.data, base_lr)  # Fallback to base_lr
-                ).cpu().numpy().flatten()[:NUM_PARAMS]
-                
+                state = optimizer.state.get(model.fc1.weight, {})
+                effective_lr_tensor = state.get('effective_lr', torch.full_like(model.fc1.weight.data, optimizer.param_groups[0]['base_lr']))
+                effective_lr = effective_lr_tensor.cpu().numpy().flatten()[:NUM_PARAMS]
+
             gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
     return epoch_loss / len(train_loader)
 
 
-
-# Training function for SGD with Momentum
+# Training function for Standard SGD and SGD with Momentum
 def train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
     model.train()
     criterion = nn.CrossEntropyLoss()
@@ -325,7 +319,7 @@ def train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interv
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                # Effective learning rates are fixed for SGD with Momentum (constant)
+                # Effective learning rates are fixed for SGD and SGD with Momentum (constant)
                 effective_lr = np.full(NUM_PARAMS, optimizer.param_groups[0]['lr'])
             gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
@@ -354,9 +348,8 @@ def train_adamw(model, device, train_loader, optimizer, epoch, log_interval=100,
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                # AdamW has adaptive learning rates; approximate by using the current learning rate
-                # This is a simplification; for true per-parameter learning rates, more detailed tracking is needed
-                effective_lr = np.array([group['lr'] for group in optimizer.param_groups] * NUM_PARAMS)[:NUM_PARAMS]
+                # AdamW has adaptive learning rates; for simplicity, we use the current learning rate
+                effective_lr = np.full(NUM_PARAMS, optimizer.param_groups[0]['lr'])
             gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
 
     return epoch_loss / len(train_loader)
@@ -379,7 +372,7 @@ def validate(model, device, val_loader):
     val_loss /= len(val_loader.dataset)
     accuracy = 100. * correct / len(val_loader.dataset)
     print(f'Validation set: Average loss: {val_loss:.4f}, Accuracy: {correct}/{len(val_loader.dataset)} '
-          f'({accuracy:.0f}%)\n')
+          f'({accuracy:.2f}%)\n')
     return val_loss, accuracy
 
 
@@ -400,7 +393,7 @@ def test(model, device, test_loader):
     test_loss /= len(test_loader.dataset)
     accuracy = 100. * correct / len(test_loader.dataset)
     print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} '
-          f'({accuracy:.0f}%)\n')
+          f'({accuracy:.2f}%)\n')
     return test_loss, accuracy
 
 
@@ -439,7 +432,7 @@ def main():
     # Data transformation and loaders
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
+        transforms.Normalize((0.1307,), (0.3081,))  # Mean and std for MNIST
     ])
     full_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
 
@@ -452,6 +445,9 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=1000, shuffle=False)
     test_loader = DataLoader(datasets.MNIST('./data', train=False, transform=transform), batch_size=1000, shuffle=False)
 
+    # Initialize a base model to copy from
+    base_model = SimpleNet().to(device).state_dict()
+
     # Initialize models and optimizers
     optimizers_config = {
         'RescaledSGD': {
@@ -459,26 +455,34 @@ def main():
             'optimizer': RescaledSGD(SimpleNet().parameters(),
                                      base_lr=base_lr_rescaled_sgd,
                                      peak_lr=peak_lr_rescaled_sgd,
-                                     decay=decay)
+                                     decay=decay),
+            'lr': peak_lr_rescaled_sgd  # Initial learning rate
         },
         'StandardSGD': {
             'model': SimpleNet().to(device),
             'optimizer': optim.SGD(SimpleNet().parameters(),
-                                   lr=lr_sgd)
+                                   lr=lr_sgd),
+            'lr': lr_sgd
         },
         'SGD_Momentum': {
             'model': SimpleNet().to(device),
             'optimizer': optim.SGD(SimpleNet().parameters(),
                                    lr=lr_sgd,
-                                   momentum=momentum)
+                                   momentum=momentum),
+            'lr': lr_sgd
         },
         'AdamW': {
             'model': SimpleNet().to(device),
             'optimizer': optim.AdamW(SimpleNet().parameters(),
                                      lr=lr_adamw,
-                                     weight_decay=weight_decay_adamw)
+                                     weight_decay=weight_decay_adamw),
+            'lr': lr_adamw
         }
     }
+
+    # Ensure all models start with the same initial weights
+    for config in optimizers_config.values():
+        config['model'].load_state_dict(base_model)
 
     # Track losses for plotting
     train_losses = {opt: [] for opt in optimizers_config.keys()}
@@ -517,12 +521,14 @@ def main():
     # Training loop in a separate thread
     def training_loop():
         for epoch in range(1, epochs + 1):
-            print(f"--- Epoch {epoch} ---")
+            print(f"\n--- Epoch {epoch} ---")
 
             # Train each optimizer
             for opt_name, config in optimizers_config.items():
                 model = config['model']
                 optimizer = config['optimizer']
+                current_lr = config['lr']
+                print(f"\nTraining with {opt_name} (LR: {current_lr:.2e}):")
 
                 if opt_name == 'RescaledSGD':
                     train_loss = train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
@@ -539,6 +545,8 @@ def main():
                 val_loss, val_acc = validate(model, device, val_loader)
                 val_losses[opt_name].append(val_loss)
 
+                print(f"{opt_name} - Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.2f}%")
+
             # After training all optimizers for this epoch, continue to next epoch
 
         # After training, send a message to plot the losses
@@ -549,8 +557,9 @@ def main():
         # Test the models and output results
         for opt_name, config in optimizers_config.items():
             model = config['model']
-            print(f"Testing {opt_name} Model")
-            test(model, device, test_loader)
+            print(f"\nTesting {opt_name} Model")
+            test_loss, test_acc = test(model, device, test_loader)
+            print(f"{opt_name} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
 
     # Start the training thread
     training_thread = threading.Thread(target=training_loop)
