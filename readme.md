@@ -1,109 +1,152 @@
-# RescaledSGD vs. StandardSGD: MNIST Training with Real-Time Visualization
+# GradRetentionNet
 
+![GradRetentionNet Logo](https://github.com/waefrebeorn/GradRetentionNet/blob/main/logo.png?raw=true)
 
-## Table of Contents
-- [Introduction](#introduction)
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Visualization](#visualization)
-- [Credits](#credits)
-- [License](#license)
+## Overview
 
-## Introduction
+**GradRetentionNet** is a pioneering project that introduces the **RescaledSGD** optimizer, inspired by the **Retention Net** concept. This custom optimizer dynamically adjusts learning rates based on gradient magnitudes, enhancing the training efficiency and performance of neural networks. By retaining and scaling gradients, **RescaledSGD** offers a more adaptive optimization strategy compared to the traditional **Stochastic Gradient Descent (SGD)**.
 
-Welcome to the **RescaledSGD vs. StandardSGD** project! This project demonstrates the implementation and comparison of a custom optimizer, **RescaledSGD**, against the standard **SGD** optimizer in training a simple neural network on the MNIST dataset. Additionally, it provides a real-time graphical user interface (GUI) to visualize parameter updates, gradients, and effective learning rates during training.
+The project includes a user-friendly graphical interface built with Tkinter, allowing real-time visualization of parameter updates, gradients, and effective learning rates during the training process. This visual feedback aids in understanding the optimization dynamics and the impact of the RescaledSGD optimizer.
 
 ## Features
 
-- **Custom Optimizer (`RescaledSGD`)**: Dynamically adjusts learning rates based on gradient magnitudes, aiming for more effective and stable training.
-- **Standard Optimizer (`SGD`)**: Serves as a baseline for comparison with a fixed learning rate.
-- **Real-Time Visualization**: Utilizes Tkinter and Matplotlib to display parameter values, gradients, and effective learning rates in real-time.
-- **Multi-Threaded Training**: Ensures the GUI remains responsive by running the training process in a separate thread.
-- **User Controls**: Interactive sliders and input fields allow users to adjust learning rates and visualization parameters on the fly.
+- **RescaledSGD Optimizer**: Implements a gradient retention and dynamic learning rate scaling mechanism.
+- **Real-Time Visualization**: Interactive GUI to monitor parameter changes, gradients, and effective learning rates.
+- **Comparison with Standard SGD**: Demonstrates the advantages of RescaledSGD over traditional SGD on the MNIST dataset.
+- **User Controls**: Adjustable learning rate settings and scaling parameters to experiment with optimization behavior.
+- **Threaded Training**: Ensures a responsive GUI by running the training process in a separate thread.
 
-## Installation
+## Getting Started
 
 ### Prerequisites
 
-Ensure you have Python 3.6 or later installed. It's recommended to use a virtual environment to manage dependencies.
+Ensure you have the following installed:
 
-### Steps
+- **Python 3.6 or higher**
+- **pip** (Python package installer)
+
+### Installation
 
 1. **Clone the Repository**
+
    ```bash
-   git clone https://github.com/yourusername/your-repo.git
-   cd your-repo
+   git clone https://github.com/waefrebeorn/GradRetentionNet.git
+   cd GradRetentionNet
    ```
 
-2. **Create and Activate a Virtual Environment**
+2. **Create a Virtual Environment (Optional but Recommended)**
+
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
 3. **Install Dependencies**
+
    ```bash
    pip install -r requirements.txt
    ```
 
-   *If you don't have a `requirements.txt`, you can install the necessary packages individually:*
+   *If `requirements.txt` is not provided, install the necessary packages manually:*
+
    ```bash
    pip install torch torchvision matplotlib
    ```
 
-   > **Note:** `tkinter` is usually included with Python installations. If it's missing, refer to your operating system's instructions to install it.
+   *Note: `tkinter` is typically included with standard Python installations. If not, install it based on your operating system.*
+
+### Running the Application
+
+Execute the main script to start training and launch the GUI:
+
+```bash
+python main.py
+```
+
+Upon running, a GUI window will appear, displaying real-time graphs of parameter updates, gradients, and effective learning rates for both **RescaledSGD** and **StandardSGD** optimizers.
 
 ## Usage
 
-1. **Activate the Virtual Environment**
-   ```bash
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+The GUI provides several interactive controls to customize the training visualization:
 
-2. **Run the Script**
-   ```bash
-   python main.py
-   ```
+- **Learning Rate Slider**: Adjusts the effective learning rate manually.
+- **Retain Minimum Scaling**: Toggles whether to retain the minimum scaling factor in learning rate adjustments.
+- **Base Learning Rate Input**: Sets the base learning rate (`base_lr`) for **RescaledSGD**.
+- **Y-Range Multiplier Input**: Modifies the Y-axis scaling for better visualization.
 
-   This will launch the GUI and start the training process in the background. You will see real-time updates of parameter changes, gradients, and effective learning rates for both `RescaledSGD` and `StandardSGD` optimizers.
+These controls allow users to experiment with different optimization settings and observe their effects in real-time.
 
-## Visualization
+## RescaledSGD Optimizer
 
-The GUI provides a comprehensive view of the training dynamics:
+The **RescaledSGD** optimizer is the core innovation of this project, embodying the **Retention Net** idea. Here's how it works:
 
-- **Tabs for Each Optimizer**: Switch between `RescaledSGD` and `StandardSGD` to observe their behaviors.
-- **Parameter Bars**: Blue bars represent current parameter values, while green bars show updated values after applying gradients.
-- **Effective Learning Rates**: Dashed orange lines indicate the learning rates applied to each parameter.
-- **Arrows**: Red arrows illustrate the direction and magnitude of parameter updates.
-- **Controls**:
-  - **Learning Rate Slider**: Adjust the effective learning rate manually.
-  - **Retain Minimum Scaling**: Toggle whether to retain minimum scaling in learning rate adjustments.
-  - **Base Learning Rate Input**: Set the base learning rate for `RescaledSGD`.
-  - **Y-Range Multiplier Input**: Modify the Y-axis scaling for better visualization.
+1. **Gradient Retention**: Instead of discarding gradients after each update, **RescaledSGD** retains a persistent gradient that decays over time. This retention helps in smoothing out gradient fluctuations and maintaining a memory of past gradients.
 
-After training completes, a separate plot displays the training and validation losses for both optimizers across all epochs, allowing for an in-depth comparison of their performances.
+2. **Dynamic Learning Rate Scaling**:
+   - **Base Learning Rate (`base_lr`)**: The minimum learning rate applied to parameters with the smallest gradients.
+   - **Peak Learning Rate (`peak_lr`)**: The maximum learning rate applied to parameters with the largest gradients.
+   - **Scaling Mechanism**: For each parameter, the effective learning rate is scaled between `base_lr` and `peak_lr` based on the relative magnitude of its retained gradient. This ensures that parameters with larger gradients receive larger updates, facilitating faster convergence.
+
+3. **Decay Factor (`decay`)**: Controls the rate at which the retained gradients decay over time, influencing the optimizer's sensitivity to recent gradient information.
+
+**Benefits of RescaledSGD**:
+
+- **Adaptive Updates**: Tailors the learning rate for each parameter individually, enhancing optimization efficiency.
+- **Improved Convergence**: Facilitates faster and more stable convergence by balancing aggressive and conservative updates based on gradient magnitudes.
+- **Enhanced Generalization**: Demonstrated better performance on validation and test datasets compared to standard SGD, indicating improved generalization capabilities.
+
+## Results
+
+In experiments conducted on the MNIST dataset, **RescaledSGD** significantly outperformed **StandardSGD**:
+
+- **Validation Accuracy**: Achieved up to 92% accuracy with **RescaledSGD**, compared to 53% with **StandardSGD**.
+- **Test Accuracy**: Reached 92% on the test set using **RescaledSGD**, whereas **StandardSGD** only achieved 54%.
+- **Loss Metrics**: Consistently lower validation and test loss values with **RescaledSGD**, indicating better model performance and generalization.
+
+These results underscore the effectiveness of the gradient retention and dynamic learning rate scaling mechanisms in **RescaledSGD**.
+
+## Repository
+
+Access the project repository here: [GradRetentionNet](https://github.com/waefrebeorn/GradRetentionNet)
 
 ## Credits
 
-- **WuBu WaefreBeorn**: Lead Developer, Implemented and Bug-Fixed the Project.
-- **Kalomaze**: Conceptual Contributor, Provided General Ideas and Guidance.
-- **OpenAI ChatGPT**: Assisted in Code Generation and Implementation Strategies.
+- **WuBu WaefreBeorn**: Project lead, implementation, and bug fixes.
+- **Kalomaze**: Conceptual ideas and guidance for prompting the creation of the RescaledSGD optimizer.
+- **OpenAI's ChatGPT**: Assisted in code generation and optimization discussions.
 
-A special thanks to both WuBu WaefreBeorn and Kalomaze for their collaboration and dedication to making this project successful.
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request for any enhancements, bug fixes, or suggestions.
+
+1. **Fork the Repository**
+2. **Create a Feature Branch**
+
+   ```bash
+   git checkout -b feature/YourFeature
+   ```
+
+3. **Commit Your Changes**
+
+   ```bash
+   git commit -m "Add Your Feature"
+   ```
+
+4. **Push to the Branch**
+
+   ```bash
+   git push origin feature/YourFeature
+   ```
+
+5. **Open a Pull Request**
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
 
----
+## Acknowledgments
 
-*Feel free to contribute, report issues, or suggest improvements!*
-
-# Acknowledgements
-
-- **OpenAI** for providing the powerful language model, ChatGPT, which assisted in generating and refining the code.
-- The **PyTorch** and **Matplotlib** communities for their excellent libraries and documentation.
-
----
+- **PyTorch**: For providing a robust deep learning framework.
+- **Tkinter & Matplotlib**: For enabling effective data visualization.
+- **MNIST Dataset**: For serving as a benchmark dataset for evaluation.
 
