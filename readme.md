@@ -1,6 +1,5 @@
 # GradRetentionNet
 
-![GradRetentionNet Logo](https://github.com/waefrebeorn/GradRetentionNet/blob/main/logo.png?raw=true)
 
 ## Overview
 
