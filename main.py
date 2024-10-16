@@ -75,6 +75,8 @@ class RescaledSGD(optim.Optimizer):
                 state = self.state[p]
                 if 'persistent_grad' not in state:
                     state['persistent_grad'] = torch.zeros_like(p.data)
+                if 'effective_lr' not in state:
+                    state['effective_lr'] = torch.full_like(p.data, base_lr)
 
                 # Update persistent gradient with decay
                 persistent_grad = state['persistent_grad']
@@ -91,15 +93,15 @@ class RescaledSGD(optim.Optimizer):
                     scaled_grad = persistent_grad * base_lr
                     scaled_lr = torch.full_like(p.data, base_lr)
 
-                # Store the effective learning rates for visualization, ensuring shape consistency
-                if 'effective_lr' not in state:
-                    state['effective_lr'] = torch.zeros_like(p.data)
+                # Update the effective learning rate state
                 state['effective_lr'].copy_(scaled_lr)
 
                 # Update parameters
                 p.data.add_(scaled_grad, alpha=-1)
 
         return loss
+      
+        
 # =======================
 # Neural Network Model
 # =======================
@@ -296,19 +298,19 @@ def get_rescaled_sgd_config():
 def get_sgd_config():
     model = MNISTNet()
     optimizer = optim.SGD(model.parameters(), lr=BASE_LR)
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = StepLR(optimizer, step_size=10, gamma=(PEAK_LR / BASE_LR) ** (1 / EPOCHS))
     return model, optimizer, scheduler
 
 def get_sgd_momentum_config():
     model = MNISTNet()
     optimizer = optim.SGD(model.parameters(), lr=BASE_LR, momentum=0.9)
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = StepLR(optimizer, step_size=10, gamma=(PEAK_LR / BASE_LR) ** (1 / EPOCHS))
     return model, optimizer, scheduler
 
 def get_adam_config():
     model = MNISTNet()
     optimizer = optim.Adam(model.parameters(), lr=BASE_LR)
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = StepLR(optimizer, step_size=10, gamma=(PEAK_LR / BASE_LR) ** (1 / EPOCHS))
     return model, optimizer, scheduler
 
 optimizers_config = {
