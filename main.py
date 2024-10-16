@@ -100,8 +100,7 @@ class RescaledSGD(optim.Optimizer):
                 p.data.add_(scaled_grad, alpha=-1)
 
         return loss
-      
-        
+
 # =======================
 # Neural Network Model
 # =======================
@@ -133,11 +132,12 @@ class MNISTNet(nn.Module):
 # GUI for Visualization
 # =======================
 class OptimizationPlotApp:
-    def __init__(self, master, optimizers, epochs):
+    def __init__(self, master, optimizers, epochs, skip_event):
         self.master = master
         master.title("Optimizer Comparison")
         self.optimizers = optimizers
         self.epochs = epochs
+        self.skip_event = skip_event  # Event to signal skipping
 
         self.notebook = ttk.Notebook(master)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -170,6 +170,10 @@ class OptimizationPlotApp:
         # Save button
         self.save_button = ttk.Button(master, text="Save Graphs", command=self.save_graphs)
         self.save_button.pack(pady=10)
+
+        # Skip to Next Optimizer button
+        self.skip_button = ttk.Button(master, text="Skip to Next Optimizer", command=self.skip_to_next_optimizer)
+        self.skip_button.pack(pady=10)
 
     def create_plot(self, name):
         frame = ttk.Frame(self.notebook)
@@ -286,6 +290,11 @@ class OptimizationPlotApp:
                 fig.savefig(f"{directory}/{name}.png")
             messagebox.showinfo("Save Complete", "All graphs have been saved.")
 
+    def skip_to_next_optimizer(self):
+        """Sets the skip_event to signal the training loop to skip the current optimizer."""
+        self.skip_event.set()
+        self.status_var.set("Skipping to next optimizer...")
+
 # =======================
 # Optimizer Configurations
 # =======================
@@ -323,7 +332,7 @@ optimizers_config = {
 # =======================
 # Training and Validation
 # =======================
-def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log_interval, gui_queue, trial):
+def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log_interval, gui_queue, trial, skip_event):
     model.train()
     train_loss = 0
     correct = 0
@@ -333,6 +342,10 @@ def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log
     initialize_effective_lr(optimizer, BASE_LR)
 
     for batch_idx, (data, target) in enumerate(train_loader):
+        if skip_event.is_set():
+            print("Skip event detected. Aborting current optimizer training.")
+            return None, None  # Signal to abort training
+
         data, target = data.to(device), target.to(device)
 
         # Define a closure that computes the output and loss
@@ -424,33 +437,73 @@ def initialize_effective_lr(optimizer, base_lr):
             if 'effective_lr' not in state:
                 state['effective_lr'] = torch.full_like(p.data, base_lr)
 
-# =======================
-# Training Loop Adjustment for Optimizer Switch
-# =======================
-def run_experiment(config_func, train_loader, val_loader, test_loader, device, epochs, gui_queue, trial):
+def initialize_adam_states_with_gradients(optimizer, model, device):
+    """
+    Performs a dummy forward and backward pass to ensure gradients are initialized for Adam.
+    """
+    # Create a dummy input tensor with the same dimensions as a typical input
+    dummy_input = torch.randn(1, 1, 28, 28).to(device)  # Adjust dimensions as necessary for MNISTNet
+    dummy_target = torch.tensor([0], dtype=torch.long).to(device)  # Assuming single target for dummy input
+
+    # Perform a forward pass
+    output = model(dummy_input)
+    loss = F.nll_loss(output, dummy_target)
+
+    # Perform a backward pass to initialize gradients
+    loss.backward()
+
+    # Now, the optimizer should be able to initialize the state with gradients available
+    optimizer.step()
+    optimizer.zero_grad()
+
+def run_experiment(config_func, train_loader, val_loader, test_loader, device, epochs, gui_queue, trial, skip_event):
     # Unpack model and optimizer, optionally a scheduler if provided
-    model, optimizer, *scheduler_optional = config_func()
-    scheduler = scheduler_optional[0] if scheduler_optional else None
+    config = config_func()
+    if len(config) == 2:
+        model, optimizer = config
+        scheduler = None
+    elif len(config) == 3:
+        model, optimizer, scheduler = config
+    else:
+        raise ValueError("Optimizer configuration function returned unexpected number of items.")
 
     model = model.to(device)
 
     # Reset any lingering state in the optimizer before starting the training run
     optimizer.state = defaultdict(dict)
 
+    # Ensure gradients are zeroed before starting training
+    model.zero_grad()
+    optimizer.zero_grad()
+
+    # Initialize states for Adam specifically to prevent KeyErrors
+    if isinstance(optimizer, optim.Adam):
+        initialize_adam_states_with_gradients(optimizer, model, device)
+
     # Ensure the 'effective_lr' is properly initialized on optimizer switch (if using RescaledSGD)
-    initialize_effective_lr(optimizer, BASE_LR)
+    if isinstance(optimizer, RescaledSGD):
+        initialize_effective_lr(optimizer, BASE_LR)
 
     for epoch in range(1, epochs + 1):
         train_loss, train_acc = train_with_custom_scaling(
-            model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=gui_queue, trial=trial
+            model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=gui_queue, trial=trial, skip_event=skip_event
         )
+
+        if skip_event.is_set():
+            print(f"Skipping {type(optimizer).__name__} for Trial {trial + 1}.")
+            break  # Skip to next optimizer
+
+        if train_loss is None and train_acc is None:
+            print(f"Training aborted for {type(optimizer).__name__} on Trial {trial + 1}.")
+            break  # Training was aborted due to skip_event
+
         val_loss, val_acc = validate(model, device, val_loader)
 
         if scheduler:
             scheduler.step()
 
         gui_queue.put(('metrics', {
-            'learning_rates': optimizer.param_groups[0]['lr'],
+            'learning_rates': optimizer.param_groups[0]['lr'] if not isinstance(optimizer, RescaledSGD) else optimizer.state[model.fc1.weight]['effective_lr'].mean(),
             'train_loss': train_loss,
             'val_loss': val_loss,
             'train_acc': train_acc,
@@ -458,10 +511,11 @@ def run_experiment(config_func, train_loader, val_loader, test_loader, device, e
         }, trial))
         gui_queue.put(('progress', 1))
 
-    test_loss, test_acc = test(model, device, test_loader)
-    return test_loss, test_acc
-
-
+    if not skip_event.is_set():
+        test_loss, test_acc = test(model, device, test_loader)
+        return test_loss, test_acc
+    else:
+        return None, None  # Indicate that the training was skipped
 
 # =======================
 # Main Function
@@ -493,9 +547,12 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
+    # Initialize skip event
+    skip_event = threading.Event()
+
     # Initialize GUI
     root = tk.Tk()
-    app = OptimizationPlotApp(root, optimizers=list(optimizers_config.keys()), epochs=EPOCHS)
+    app = OptimizationPlotApp(root, optimizers=list(optimizers_config.keys()), epochs=EPOCHS, skip_event=skip_event)
 
     # Function to handle incoming data from the training thread
     def handle_queue():
@@ -526,13 +583,23 @@ def main():
         results = defaultdict(list)
         for trial in range(NUM_TRIALS):
             for opt_name, config_func in optimizers_config.items():
+                if skip_event.is_set():
+                    # If skip_event is set before starting a new optimizer, clear it
+                    skip_event.clear()
+
                 app.status_var.set(f"Training with {opt_name} (Trial {trial + 1}/{NUM_TRIALS})")
                 global current_optimizer
                 current_optimizer = opt_name
 
-                test_loss, test_acc = run_experiment(config_func, train_loader, val_loader, test_loader, device, EPOCHS, data_queue, trial)
-                results[opt_name].append((test_loss, test_acc))
-                print(f"{opt_name} - Trial {trial + 1} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
+                test_loss, test_acc = run_experiment(
+                    config_func, train_loader, val_loader, test_loader, device, EPOCHS, data_queue, trial, skip_event
+                )
+
+                if test_loss is not None and test_acc is not None:
+                    results[opt_name].append((test_loss, test_acc))
+                    print(f"{opt_name} - Trial {trial + 1} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
+                else:
+                    print(f"{opt_name} - Trial {trial + 1} - Training skipped or aborted.")
 
         app.status_var.set("Training completed")
 
@@ -545,17 +612,21 @@ def main():
 
         results_text.insert(tk.END, f"Final Results (averaged over {NUM_TRIALS} trials):\n\n")
         for opt_name, trials in results.items():
-            avg_loss = np.mean([t[0] for t in trials])
-            avg_acc = np.mean([t[1] for t in trials])
-            std_acc = np.std([t[1] for t in trials])
-            results_text.insert(tk.END, f"{opt_name}:\n")
-            results_text.insert(tk.END, f"  Avg Test Loss: {avg_loss:.4f}\n")
-            results_text.insert(tk.END, f"  Avg Test Accuracy: {avg_acc:.2f}% ± {std_acc:.2f}%\n\n")
+            if trials:
+                avg_loss = np.mean([t[0] for t in trials])
+                avg_acc = np.mean([t[1] for t in trials])
+                std_acc = np.std([t[1] for t in trials])
+                results_text.insert(tk.END, f"{opt_name}:\n")
+                results_text.insert(tk.END, f"  Avg Test Loss: {avg_loss:.4f}\n")
+                results_text.insert(tk.END, f"  Avg Test Accuracy: {avg_acc:.2f}% ± {std_acc:.2f}%\n\n")
+            else:
+                results_text.insert(tk.END, f"{opt_name}:\n")
+                results_text.insert(tk.END, f"  No successful trials.\n\n")
 
         results_text.config(state=tk.DISABLED)
 
     # Start the training thread
-    training_thread = threading.Thread(target=training_loop)
+    training_thread = threading.Thread(target=training_loop, daemon=True)
     training_thread.start()
 
     # Start the GUI main loop
