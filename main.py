@@ -1,49 +1,40 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, random_split
 import numpy as np
 import matplotlib.pyplot as plt
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.animation import FuncAnimation
 import threading
 import queue
+from collections import defaultdict
 
 # Constants
-NUM_PARAMS = 10  # Number of parameters to visualize
-VALUE_RANGE = 0.05  # Range of parameter values (-VALUE_RANGE to VALUE_RANGE)
-Y_RANGE_MULTIPLIER = 1.0  # Default multiplier for y-axis range
+NUM_PARAMS = 10
+HIDDEN_SIZE = 128
+VALUE_RANGE = 0.05
+Y_RANGE_MULTIPLIER = 1.0
+NUM_TRIALS = 3
+EPOCHS = 20
+BATCH_SIZE = 128
+BASE_LR, PEAK_LR = 1e-2, 1e-1  # Adjusted learning rates
+SCALE_FACTOR = 128.0  # Adjusted scale factor for gradient scaling
 
 # Queue for communication between training and GUI
 data_queue = queue.Queue()
 
-
 class RescaledSGD(optim.Optimizer):
-    def __init__(self, params, base_lr=1e-7, peak_lr=1e-4, decay=0.99):
-        """
-        Initializes the RescaledSGD optimizer.
-
-        Args:
-            params (iterable): Iterable of parameters to optimize.
-            base_lr (float): Base learning rate.
-            peak_lr (float): Peak learning rate after scaling.
-            decay (float): Decay factor for persistent gradients.
-        """
-        defaults = dict(base_lr=base_lr, peak_lr=peak_lr, decay=decay)
+    def __init__(self, params, base_lr=1e-2, peak_lr=1e-1, decay=0.99, scale_factor=128.0):
+        defaults = dict(base_lr=base_lr, peak_lr=peak_lr, decay=decay, lr=base_lr, scale_factor=scale_factor)
         super(RescaledSGD, self).__init__(params, defaults)
 
     def step(self, closure=None):
-        """
-        Performs a single optimization step with rescaled gradients.
-
-        Args:
-            closure (callable, optional): A closure that reevaluates the model and returns the loss.
-
-        Returns:
-            loss: The loss computed by the closure, if provided.
-        """
         loss = None
         if closure is not None:
             loss = closure()
@@ -52,522 +43,447 @@ class RescaledSGD(optim.Optimizer):
             base_lr = group['base_lr']
             peak_lr = group['peak_lr']
             decay = group['decay']
+            scale_factor = group['scale_factor']
 
             for p in group['params']:
                 if p.grad is None:
                     continue
 
-                # Initialize state
+                # Access the gradient
+                d_p = p.grad.data
+
+                # Scale down the gradients
+                scaled_d_p = d_p / scale_factor
+
+                # Momentum-based buffer for smoothing
                 state = self.state[p]
-                if 'persistent_grad' not in state:
-                    state['persistent_grad'] = torch.zeros_like(p.data)
-
-                # Update persistent gradient with decay
-                persistent_grad = state['persistent_grad']
-                persistent_grad.mul_(decay).add_(p.grad.data)
-
-                # Compute scaling factors based on min and max parameter updates
-                if persistent_grad.abs().max() != 0 and persistent_grad.abs().min() != 0:
-                    scaling = (persistent_grad.abs() - persistent_grad.abs().min()) / (
-                        persistent_grad.abs().max() - persistent_grad.abs().min() + 1e-8
-                    )
-                    scaled_lr = base_lr + (peak_lr - base_lr) * scaling
-                    scaled_grad = scaled_lr * persistent_grad.sign()
+                if 'momentum_buffer' not in state:
+                    buf = state['momentum_buffer'] = torch.clone(scaled_d_p).detach()
                 else:
-                    scaled_lr = base_lr if persistent_grad.abs().max() == 0 else peak_lr
-                    scaled_grad = persistent_grad * scaled_lr
+                    buf = state['momentum_buffer']
+                    buf.mul_(decay).add_(scaled_d_p, alpha=1 - decay)
 
-                # Store the effective learning rates for visualization
-                if 'effective_lr' not in state:
-                    state['effective_lr'] = torch.zeros_like(p.data)
-                state['effective_lr'].copy_(scaled_lr)
+                # Simplified rescaling of gradients
+                rescaled_grad = buf  # No non-linear scaling initially
 
-                # Update parameters
-                p.data.add_(scaled_grad, alpha=-1)
+                # Compute dynamic learning rate based on gradient magnitude
+                lr = base_lr + (peak_lr - base_lr) * torch.abs(rescaled_grad)
+
+                # Apply the update using element-wise operations
+                p.data += rescaled_grad * (-lr)
 
         return loss
 
+    def scale_gradients(self, scale_factor):
+        """Scale up gradients before backward pass."""
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is not None:
+                    p.grad.data.mul_(scale_factor)
 
-class SimpleNet(nn.Module):
-    def __init__(self, num_params=NUM_PARAMS):
-        super(SimpleNet, self).__init__()
-        self.fc1 = nn.Linear(28 * 28, num_params)
-        self.fc2 = nn.Linear(num_params, 10)
+    def unscale_gradients(self, scale_factor):
+        """Scale down gradients before optimizer step."""
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is not None:
+                    p.grad.data.div_(scale_factor)
+
+    def get_lr(self):
+        return [group['lr'] for group in self.param_groups]
+
+class MNISTNet(nn.Module):
+    def __init__(self):
+        super(MNISTNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.dropout1 = nn.Dropout(0.25)  # Changed from Dropout2d
+        self.dropout2 = nn.Dropout(0.5)   # Changed from Dropout2d
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 10)
 
     def forward(self, x):
-        x = x.view(-1, 28 * 28)
-        x = torch.relu(self.fc1(x))
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.dropout2(x)
         x = self.fc2(x)
-        return x
+        return F.log_softmax(x, dim=1)
 
-
-# GUI for parameter visualization
-class ParameterPlotApp:
-    def __init__(self, master, optimizers):
+class OptimizationPlotApp:
+    def __init__(self, master, optimizers, epochs):
         self.master = master
-        master.title("Optimizer Parameter Visualization")
+        master.title("Optimizer Comparison")
+        self.optimizers = optimizers
+        self.epochs = epochs
 
-        self.optimizers = optimizers  # List of optimizer names
-        self.num_optimizers = len(optimizers)
-
-        # Initialize parameter, gradient, and learning rate storage for each optimizer
-        self.parameters = {opt: np.random.uniform(-VALUE_RANGE, VALUE_RANGE, NUM_PARAMS) for opt in optimizers}
-        self.gradients = {opt: np.random.uniform(-1, 1, NUM_PARAMS) for opt in optimizers}
-        self.learning_rates = {opt: np.zeros(NUM_PARAMS) for opt in optimizers}
-        self.y_range_multiplier = Y_RANGE_MULTIPLIER
-
-        # Create notebook for tabs
         self.notebook = ttk.Notebook(master)
-        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        # Dictionaries to hold figures and axes
         self.figures = {}
         self.axes = {}
-        self.canvases = {}
+        self.lines = {}
+        self.error_bars = {}
+        self.animations = {}
+        self.data = defaultdict(lambda: defaultdict(list))
 
-        # Create a tab for each optimizer
-        for opt in optimizers:
-            frame = ttk.Frame(self.notebook)
-            self.notebook.add(frame, text=opt)
-            fig, ax = plt.subplots(figsize=(12, 6))
-            canvas = FigureCanvasTkAgg(fig, master=frame)
-            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
-            self.figures[opt] = fig
-            self.axes[opt] = ax
-            self.canvases[opt] = canvas
+        for name in ['learning_rates', 'train_loss', 'val_loss', 'train_acc', 'val_acc']:
+            for opt in optimizers:
+                self.data[name][opt] = [[] for _ in range(NUM_TRIALS)]  # Initialize list for each trial
+            self.create_plot(name)
 
-        # Controls frame
-        controls = ttk.Frame(master)
-        controls.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(master, variable=self.progress_var, maximum=epochs * len(optimizers) * NUM_TRIALS)
+        self.progress_bar.pack(fill=tk.X, padx=10, pady=10)
 
-        # Effective Learning Rate label
-        self.lr_label = ttk.Label(controls, text="Effective Learning Rate: 0.00")
-        self.lr_label.pack(side=tk.TOP)
+        self.status_var = tk.StringVar()
+        self.status_label = ttk.Label(master, textvariable=self.status_var)
+        self.status_label.pack()
 
-        # Learning rate slider
-        self.slider = ttk.Scale(controls, from_=0, to=1, orient=tk.HORIZONTAL, length=300, command=self.update_plot)
-        self.slider.pack(side=tk.TOP)
+        self.save_button = ttk.Button(master, text="Save Graphs", command=self.save_graphs)
+        self.save_button.pack(pady=10)
 
-        # Retain Minimum Scaling checkbox
-        self.retain_min_var = tk.BooleanVar()
-        ttk.Checkbutton(controls, text="Retain Minimum Scaling", variable=self.retain_min_var, command=self.update_plot).pack(side=tk.TOP)
+    def create_plot(self, name):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=name.replace('_', ' ').title())
+        fig, ax = plt.subplots(figsize=(8, 6))
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        self.figures[name] = fig
+        self.axes[name] = ax
 
-        # Base Learning Rate input
-        base_lr_frame = ttk.Frame(controls)
-        base_lr_frame.pack(side=tk.TOP, pady=5)
-        ttk.Label(base_lr_frame, text="Base LR:").pack(side=tk.LEFT)
-        self.base_lr_entry = ttk.Entry(base_lr_frame, width=10)
-        self.base_lr_entry.insert(0, "1e-7")
-        self.base_lr_entry.pack(side=tk.LEFT)
-        ttk.Button(base_lr_frame, text="Update", command=self.update_plot).pack(side=tk.LEFT, padx=5)
+        x = list(range(1, self.epochs + 1))
+        self.lines[name] = {opt: ax.plot(x, [0.1] * self.epochs, label=opt)[0] for opt in self.optimizers}  # Initialized with 0.1 to avoid log scale issues
+        self.error_bars[name] = {opt: ax.fill_between(x, [0] * self.epochs, [0] * self.epochs, alpha=0.3) for opt in self.optimizers}
 
-        # Y-Range Multiplier input
-        y_range_frame = ttk.Frame(controls)
-        y_range_frame.pack(side=tk.TOP, pady=5)
-        ttk.Label(y_range_frame, text="Y-Range Multiplier:").pack(side=tk.LEFT)
-        self.y_range_entry = ttk.Entry(y_range_frame, width=10)
-        self.y_range_entry.insert(0, str(Y_RANGE_MULTIPLIER))
-        self.y_range_entry.pack(side=tk.LEFT)
-        ttk.Button(y_range_frame, text="Update", command=self.update_y_range).pack(side=tk.LEFT, padx=5)
+        ax.legend()
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel(name.replace('_', ' ').title())
+        ax.set_xlim(1, self.epochs)
 
-        # Initialize plots for each optimizer
-        self.update_all_plots()
+        if 'acc' in name:
+            ax.set_ylim(0, 100)
+        elif 'loss' in name or 'learning_rates' in name:
+            # Initially set to log scale; handle dynamically in animate
+            ax.set_yscale('log')
 
-    def get_learning_rate(self):
-        try:
-            base_lr = float(self.base_lr_entry.get())
-        except ValueError:
-            base_lr = 1e-7
-        slider_lr = self.slider.get()
-        return max(base_lr, slider_lr)
+        # Updated FuncAnimation to disable frame data caching to fix the warning
+        self.animations[name] = FuncAnimation(fig, self.animate, fargs=(name,), interval=500, blit=True, cache_frame_data=False)
 
-    def apply_learning_rate(self, gradients, learning_rate):
-        base_lr = float(self.base_lr_entry.get())
-        if not self.retain_min_var.get() or learning_rate <= base_lr:
-            return learning_rate * gradients, np.full_like(gradients, learning_rate)
+        self.hover_annotation = ax.annotate("", xy=(0, 0), xytext=(20, 20), textcoords="offset points",
+                                            bbox=dict(boxstyle="round", fc="w"),
+                                            arrowprops=dict(arrowstyle="->"))
+        self.hover_annotation.set_visible(False)
+        fig.canvas.mpl_connect("motion_notify_event", lambda event: self.hover(event, name))
 
-        abs_gradients = np.abs(gradients)
-        scaled_gradients = (abs_gradients - abs_gradients.min()) / (abs_gradients.max() - abs_gradients.min() + 1e-8)  # Avoid division by zero
-        adjusted_lr = base_lr + (learning_rate - base_lr) * scaled_gradients
-        return adjusted_lr * gradients, adjusted_lr
+    def hover(self, event, name):
+        if event.inaxes == self.axes[name]:
+            for opt, line in self.lines[name].items():
+                cont, ind = line.contains(event)
+                if cont:
+                    x_data, y_data = line.get_data()
+                    if len(ind["ind"]) > 0:
+                        idx = ind["ind"][0]
+                        x, y = x_data[idx], y_data[idx]
+                        self.hover_annotation.xy = (x, y)
+                        self.hover_annotation.set_text(f"{opt}: {y:.4f}")
+                        self.hover_annotation.set_visible(True)
+                        self.figures[name].canvas.draw_idle()
+                        return
+        self.hover_annotation.set_visible(False)
+        self.figures[name].canvas.draw_idle()
 
-    def update_y_range(self):
-        try:
-            self.y_range_multiplier = float(self.y_range_entry.get())
-            self.update_all_plots()
-        except ValueError:
-            print("Invalid Y-Range Multiplier")
-
-    def update_plot(self, *args):
-        learning_rate = self.get_learning_rate()
-        self.lr_label.config(text=f"Effective Learning Rate: {learning_rate:.2e}")
-
-        # Iterate through each optimizer and update its plot
+    def animate(self, _, name):
+        updated_artists = []
         for opt in self.optimizers:
-            parameter_changes, effective_lr = self.apply_learning_rate(self.gradients[opt], learning_rate)
-            updated_parameters = self.parameters[opt] + parameter_changes
+            data = self.data[name][opt]
+            # Check if all trials have data for the current epoch
+            # Find the minimum length across trials
+            min_length = min(len(trial) for trial in data)
+            if min_length == 0:
+                continue  # No data to plot yet
 
-            ax = self.axes[opt]
-            ax.clear()
-            x = np.arange(NUM_PARAMS)
-            width = 0.35
+            # Compute mean and std for each epoch across trials up to min_length
+            epoch_means = []
+            epoch_stds = []
+            for epoch_idx in range(min_length):
+                epoch_values = [trial[epoch_idx] for trial in data if len(trial) > epoch_idx]
+                if epoch_values:
+                    epoch_means.append(np.mean(epoch_values))
+                    epoch_stds.append(np.std(epoch_values))
+                else:
+                    epoch_means.append(0)
+                    epoch_stds.append(0)
 
-            # Current parameters
-            ax.bar(x - width / 2, self.parameters[opt], width, label='Current', color='skyblue')
-            # Updated parameters
-            ax.bar(x + width / 2, updated_parameters, width, label='Updated', color='lightgreen')
-            # Plot effective learning rates as a line
-            ax.plot(x, effective_lr, label='Effective LR', color='orange', marker='o', linestyle='dashed')
+            if not epoch_means:
+                continue
 
-            # Arrows indicating parameter changes
-            for i, (current, updated) in enumerate(zip(self.parameters[opt], updated_parameters)):
-                ax.arrow(i, current, 0, updated - current, color='red', width=0.005,
-                         head_width=0.02, head_length=0.01 * self.y_range_multiplier * VALUE_RANGE)
+            self.lines[name][opt].set_ydata(epoch_means)
+            self.error_bars[name][opt].remove()
+            self.error_bars[name][opt] = self.axes[name].fill_between(
+                range(1, len(epoch_means) + 1),
+                [m - s for m, s in zip(epoch_means, epoch_stds)],
+                [m + s for m, s in zip(epoch_means, epoch_stds)],
+                alpha=0.3
+            )
+            updated_artists.extend([self.lines[name][opt], self.error_bars[name][opt]])
 
-            ax.axhline(y=0, color='r', linestyle='-', linewidth=0.5)
-            ax.set_xlabel('Parameter Index')
-            ax.set_ylabel('Value / Effective LR')
-            ax.set_title(f'{opt} Parameter Changes (LR: {learning_rate:.2e})')
-            ax.set_ylim(-VALUE_RANGE * self.y_range_multiplier, VALUE_RANGE * self.y_range_multiplier)
-            ax.legend()
-            ax.grid(axis='y', linestyle='--', alpha=0.7)
-            ax.set_xticks(x)
+            # Dynamically set y-scale based on data
+            if 'acc' in name:
+                self.axes[name].set_ylim(0, 100)
+            elif 'loss' in name or 'learning_rates' in name:
+                if all(m > 0 for m in epoch_means):
+                    self.axes[name].set_yscale('log')
+                else:
+                    self.axes[name].set_yscale('linear')
+        
+        return updated_artists
 
-            self.canvases[opt].draw()
+    def update_plot(self, name, new_data, trial):
+        """Update the plot data with new metrics from a specific trial."""
+        for opt, value in new_data.items():
+            if trial < NUM_TRIALS:
+                self.data[name][opt][trial].append(value)
+            else:
+                print(f"Received data for trial {trial}, but NUM_TRIALS is set to {NUM_TRIALS}")
 
-    def update_all_plots(self):
-        for opt in self.optimizers:
-            self.update_plot()
+    def update_progress(self, progress):
+        self.progress_var.set(self.progress_var.get() + progress)
 
-    def update_parameters(self, optimizer_name, parameters, gradients, effective_lr):
-        """
-        Receives updated parameters, gradients, and effective learning rates from the training loop.
+    def save_graphs(self):
+        directory = filedialog.askdirectory()
+        if directory:
+            for name, fig in self.figures.items():
+                fig.savefig(f"{directory}/{name}.png")
+            messagebox.showinfo("Save Complete", "All graphs have been saved.")
 
-        Args:
-            optimizer_name (str): Name of the optimizer.
-            parameters (np.ndarray): Current parameter values.
-            gradients (np.ndarray): Current gradient values.
-            effective_lr (np.ndarray): Effective learning rates applied to the parameters.
-        """
-        if optimizer_name in self.optimizers:
-            # Ensure we only take the first NUM_PARAMS for visualization
-            self.parameters[optimizer_name] = parameters[:NUM_PARAMS]
-            self.gradients[optimizer_name] = gradients[:NUM_PARAMS]
-            self.learning_rates[optimizer_name] = effective_lr[:NUM_PARAMS]
-            self.update_plot()
+def get_rescaled_sgd_config():
+    model = MNISTNet()
+    optimizer = RescaledSGD(model.parameters(), base_lr=BASE_LR, peak_lr=PEAK_LR, scale_factor=SCALE_FACTOR)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    return model, optimizer, scheduler
 
+def get_sgd_config():
+    model = MNISTNet()
+    optimizer = optim.SGD(model.parameters(), lr=BASE_LR)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    return model, optimizer, scheduler
 
-# Training function for RescaledSGD
-def train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
+def get_sgd_momentum_config():
+    model = MNISTNet()
+    optimizer = optim.SGD(model.parameters(), lr=BASE_LR, momentum=0.9)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    return model, optimizer, scheduler
+
+def get_adam_config():
+    model = MNISTNet()
+    optimizer = optim.Adam(model.parameters(), lr=BASE_LR)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    return model, optimizer, scheduler
+
+optimizers_config = {
+    'RescaledSGD': get_rescaled_sgd_config,
+    'SGD': get_sgd_config,
+    'SGD_Momentum': get_sgd_momentum_config,
+    'Adam': get_adam_config
+}
+
+def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, scale_factor, log_interval, gui_queue, trial):
     model.train()
-    criterion = nn.CrossEntropyLoss()
-    epoch_loss = 0
+    train_loss = 0
+    correct = 0
+    total = 0
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()  # Clear existing gradients
+        optimizer.zero_grad()
 
-        def closure():
-            """Closure function to calculate the loss."""
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            return loss
+        # Scale gradients if applicable
+        if hasattr(optimizer, 'scale_gradients'):
+            optimizer.scale_gradients(scale_factor)
 
-        # Perform optimizer step
-        loss = optimizer.step(closure)
-        epoch_loss += loss.item()
+        # Forward pass
+        output = model(data)
+        loss = F.nll_loss(output, target)
+
+        # Backward pass
+        loss.backward()
+
+        # Unscale gradients and step optimizer
+        if hasattr(optimizer, 'unscale_gradients'):
+            optimizer.unscale_gradients(scale_factor)
+            optimizer.step()
+        else:
+            optimizer.step()
+
+        train_loss += loss.item()
+        pred = output.argmax(dim=1, keepdim=True)
+        correct += pred.eq(target.view_as(pred)).sum().item()
+        total += target.size(0)
 
         if batch_idx % log_interval == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
 
-        # Optionally, send parameter updates to GUI
         if gui_queue:
             with torch.no_grad():
-                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                params = model.fc2.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                grads = model.fc2.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS] if model.fc2.weight.grad is not None else np.zeros(NUM_PARAMS)
+                # Retrieve current learning rate from optimizer
+                current_lr = optimizer.param_groups[0]['lr']
+                effective_lr = np.full(NUM_PARAMS, current_lr)
+            # Include trial index in the message
+            gui_queue.put(('metrics', {
+                'learning_rates': current_lr,
+                'train_loss': train_loss / (batch_idx + 1),
+                'val_loss': 0.0,  # Placeholder; will be updated in run_experiment
+                'train_acc': 100. * correct / total,
+                'val_acc': 0.0     # Placeholder; will be updated in run_experiment
+            }, trial))
 
-                # Access 'effective_lr' if available, else use base_lr directly from the optimizer settings
-                state = optimizer.state.get(model.fc1.weight, {})
-                effective_lr_tensor = state.get('effective_lr', torch.full_like(model.fc1.weight.data, optimizer.param_groups[0]['base_lr']))
-                effective_lr = effective_lr_tensor.cpu().numpy().flatten()[:NUM_PARAMS]
+    return train_loss / len(train_loader), 100. * correct / total
 
-            gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
-
-    return epoch_loss / len(train_loader)
-
-
-# Training function for Standard SGD and SGD with Momentum
-def train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
-    model.train()
-    criterion = nn.CrossEntropyLoss()
-    epoch_loss = 0
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()  # Clear existing gradients
-        output = model(data)  # Forward pass
-        loss = criterion(output, target)  # Calculate loss
-        loss.backward()  # Backpropagation
-        optimizer.step()  # Optimize
-        epoch_loss += loss.item()
-        if batch_idx % log_interval == 0:
-            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
-                  f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
-
-        # Optionally, send parameter updates to GUI
-        if gui_queue:
-            with torch.no_grad():
-                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                # Effective learning rates are fixed for SGD and SGD with Momentum (constant)
-                effective_lr = np.full(NUM_PARAMS, optimizer.param_groups[0]['lr'])
-            gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
-
-    return epoch_loss / len(train_loader)
-
-
-# Training function for AdamW
-def train_adamw(model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=None):
-    model.train()
-    criterion = nn.CrossEntropyLoss()
-    epoch_loss = 0
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()  # Clear existing gradients
-        output = model(data)  # Forward pass
-        loss = criterion(output, target)  # Calculate loss
-        loss.backward()  # Backpropagation
-        optimizer.step()  # Optimize
-        epoch_loss += loss.item()
-        if batch_idx % log_interval == 0:
-            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
-                  f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
-
-        # Optionally, send parameter updates to GUI
-        if gui_queue:
-            with torch.no_grad():
-                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                # AdamW has adaptive learning rates; for simplicity, we use the current learning rate
-                effective_lr = np.full(NUM_PARAMS, optimizer.param_groups[0]['lr'])
-            gui_queue.put((optimizer.__class__.__name__, params, grads, effective_lr))
-
-    return epoch_loss / len(train_loader)
-
-
-# Validation function to assess model performance
 def validate(model, device, val_loader):
     model.eval()
     val_loss = 0
     correct = 0
-    criterion = nn.CrossEntropyLoss(reduction='sum')
     with torch.no_grad():
         for data, target in val_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            val_loss += criterion(output, target).item()  # Sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True)  # Get index of the max log-probability
+            val_loss += F.nll_loss(output, target, reduction='sum').item()
+            pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     val_loss /= len(val_loader.dataset)
     accuracy = 100. * correct / len(val_loader.dataset)
-    print(f'Validation set: Average loss: {val_loss:.4f}, Accuracy: {correct}/{len(val_loader.dataset)} '
-          f'({accuracy:.2f}%)\n')
     return val_loss, accuracy
 
-
-# Testing function to measure model accuracy on the test set
 def test(model, device, test_loader):
     model.eval()
     test_loss = 0
     correct = 0
-    criterion = nn.CrossEntropyLoss(reduction='sum')
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            test_loss += criterion(output, target).item()  # Sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True)  # Get index of the max log-probability
+            test_loss += F.nll_loss(output, target, reduction='sum').item()
+            pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_loader.dataset)
     accuracy = 100. * correct / len(test_loader.dataset)
-    print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} '
-          f'({accuracy:.2f}%)\n')
     return test_loss, accuracy
 
+def run_experiment(config_func, train_loader, val_loader, test_loader, device, epochs, gui_queue, trial):
+    model, optimizer, scheduler = config_func()
+    model = model.to(device)
 
-# Plotting function to visualize training and validation loss
-def plot_losses(epochs, train_losses, val_losses, labels, title):
-    """Plot the training and validation loss for different optimizers."""
-    plt.figure(figsize=(10, 6))
-    for i, loss in enumerate(train_losses):
-        plt.plot(range(1, epochs + 1), loss, label=f'Train {labels[i]}')
-    for i, loss in enumerate(val_losses):
-        plt.plot(range(1, epochs + 1), loss, linestyle='--', label=f'Val {labels[i]}')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title(title)
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+    for epoch in range(1, epochs + 1):
+        train_loss, train_acc = train_with_custom_scaling(model, device, train_loader, optimizer, epoch, SCALE_FACTOR, 100, gui_queue, trial)
+        val_loss, val_acc = validate(model, device, val_loader)
+        scheduler.step()  # Ensure optimizer.step() is called before scheduler.step()
 
+        gui_queue.put(('metrics', {
+            'learning_rates': scheduler.get_last_lr()[0],
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'train_acc': train_acc,
+            'val_acc': val_acc
+        }, trial))
+        gui_queue.put(('progress', 1))
 
-# Main script for comprehensive testing and comparison
+    test_loss, test_acc = test(model, device, test_loader)
+    return test_loss, test_acc
+
 def main():
-    # Hyperparameters and setup
-    batch_size = 64
-    epochs = 10
-    base_lr_rescaled_sgd = 1e-7
-    peak_lr_rescaled_sgd = 1e-4
-    lr_sgd = 1e-4
-    momentum = 0.9
-    lr_adamw = 1e-3
-    weight_decay_adamw = 1e-2
-    decay = 0.99
-    log_interval = 100
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    # Data transformation and loaders
+    if use_cuda:
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = True
+
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))  # Mean and std for MNIST
+        transforms.Normalize((0.1307,), (0.3081,))
     ])
-    full_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
 
-    # Split the training set into training and validation sets
+    full_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+    test_dataset = datasets.MNIST('./data', train=False, transform=transform)
+
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1000, shuffle=False)
-    test_loader = DataLoader(datasets.MNIST('./data', train=False, transform=transform), batch_size=1000, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
-    # Initialize a base model to copy from
-    base_model = SimpleNet().to(device).state_dict()
-
-    # Initialize models and optimizers
-    optimizers_config = {
-        'RescaledSGD': {
-            'model': SimpleNet().to(device),
-            'optimizer': RescaledSGD(SimpleNet().parameters(),
-                                     base_lr=base_lr_rescaled_sgd,
-                                     peak_lr=peak_lr_rescaled_sgd,
-                                     decay=decay),
-            'lr': peak_lr_rescaled_sgd  # Initial learning rate
-        },
-        'StandardSGD': {
-            'model': SimpleNet().to(device),
-            'optimizer': optim.SGD(SimpleNet().parameters(),
-                                   lr=lr_sgd),
-            'lr': lr_sgd
-        },
-        'SGD_Momentum': {
-            'model': SimpleNet().to(device),
-            'optimizer': optim.SGD(SimpleNet().parameters(),
-                                   lr=lr_sgd,
-                                   momentum=momentum),
-            'lr': lr_sgd
-        },
-        'AdamW': {
-            'model': SimpleNet().to(device),
-            'optimizer': optim.AdamW(SimpleNet().parameters(),
-                                     lr=lr_adamw,
-                                     weight_decay=weight_decay_adamw),
-            'lr': lr_adamw
-        }
-    }
-
-    # Ensure all models start with the same initial weights
-    for config in optimizers_config.values():
-        config['model'].load_state_dict(base_model)
-
-    # Track losses for plotting
-    train_losses = {opt: [] for opt in optimizers_config.keys()}
-    val_losses = {opt: [] for opt in optimizers_config.keys()}
-
-    # Initialize GUI with all optimizers
     root = tk.Tk()
-    app = ParameterPlotApp(root, optimizers=list(optimizers_config.keys()))
+    app = OptimizationPlotApp(root, optimizers=list(optimizers_config.keys()), epochs=EPOCHS)
 
-    # Function to handle incoming data from the training thread
     def handle_queue():
         try:
             while not data_queue.empty():
-                item = data_queue.get_nowait()
-                if item[0] == 'plot_losses':
-                    _, epochs_, train_loss_data, val_loss_data, labels = item
-                    # Reorganize loss data
-                    train_losses_list = [train_loss_data[opt] for opt in optimizers_config.keys()]
-                    val_losses_list = [val_loss_data[opt] for opt in optimizers_config.keys()]
-                    plot_losses(epochs_,
-                                train_losses_list,
-                                val_losses_list,
-                                labels,
-                                'Training & Validation Loss Comparison')
+                msg = data_queue.get_nowait()
+                # Check the length of the message to differentiate between types
+                if len(msg) == 3:
+                    msg_type, data, trial = msg
+                    if msg_type == 'metrics':
+                        for name, value in data.items():
+                            app.update_plot(name, {current_optimizer: value}, trial)
+                elif len(msg) == 2:
+                    msg_type, increment = msg
+                    if msg_type == 'progress':
+                        app.update_progress(increment)
                 else:
-                    optimizer_name, params, grads, effective_lr = item
-                    app.update_parameters(optimizer_name, params, grads, effective_lr)
+                    print(f"Invalid message format: {msg}")
         except queue.Empty:
             pass
-        # Schedule the next queue check
         root.after(100, handle_queue)
-
-    # Start handling the queue
-    root.after(100, handle_queue)
-
-    # Training loop in a separate thread
+    
     def training_loop():
-        for epoch in range(1, epochs + 1):
-            print(f"\n--- Epoch {epoch} ---")
+        results = defaultdict(list)
+        for trial in range(NUM_TRIALS):
+            for opt_name, config_func in optimizers_config.items():
+                app.status_var.set(f"Training with {opt_name} (Trial {trial + 1}/{NUM_TRIALS})")
+                global current_optimizer
+                current_optimizer = opt_name
 
-            # Train each optimizer
-            for opt_name, config in optimizers_config.items():
-                model = config['model']
-                optimizer = config['optimizer']
-                current_lr = config['lr']
-                print(f"\nTraining with {opt_name} (LR: {current_lr:.2e}):")
+                test_loss, test_acc = run_experiment(config_func, train_loader, val_loader, test_loader, device, EPOCHS, data_queue, trial)
+                results[opt_name].append((test_loss, test_acc))
+                print(f"{opt_name} - Trial {trial + 1} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
 
-                if opt_name == 'RescaledSGD':
-                    train_loss = train_rescaled_sgd(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
-                elif opt_name == 'StandardSGD':
-                    train_loss = train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
-                elif opt_name == 'SGD_Momentum':
-                    train_loss = train_sgd_momentum(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
-                elif opt_name == 'AdamW':
-                    train_loss = train_adamw(model, device, train_loader, optimizer, epoch, log_interval, gui_queue=data_queue)
-                else:
-                    continue  # Unknown optimizer
+        app.status_var.set("Training completed")
 
-                train_losses[opt_name].append(train_loss)
-                val_loss, val_acc = validate(model, device, val_loader)
-                val_losses[opt_name].append(val_loss)
+        # Display final results
+        final_results_window = tk.Toplevel(root)
+        final_results_window.title("Final Results")
 
-                print(f"{opt_name} - Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.2f}%")
+        results_text = tk.Text(final_results_window, height=20, width=50)
+        results_text.pack(padx=10, pady=10)
 
-            # After training all optimizers for this epoch, continue to next epoch
+        results_text.insert(tk.END, f"Final Results (averaged over {NUM_TRIALS} trials):\n\n")
+        for opt_name, trials in results.items():
+            avg_loss = np.mean([t[0] for t in trials])
+            avg_acc = np.mean([t[1] for t in trials])
+            std_acc = np.std([t[1] for t in trials])
+            results_text.insert(tk.END, f"{opt_name}:\n")
+            results_text.insert(tk.END, f"  Avg Test Loss: {avg_loss:.4f}\n")
+            results_text.insert(tk.END, f"  Avg Test Accuracy: {avg_acc:.2f}% ± {std_acc:.2f}%\n\n")
 
-        # After training, send a message to plot the losses
-        data_queue.put(('plot_losses', epochs,
-                       train_losses, val_losses,
-                       list(optimizers_config.keys())))
+        results_text.config(state=tk.DISABLED)
 
-        # Test the models and output results
-        for opt_name, config in optimizers_config.items():
-            model = config['model']
-            print(f"\nTesting {opt_name} Model")
-            test_loss, test_acc = test(model, device, test_loader)
-            print(f"{opt_name} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
-
-    # Start the training thread
     training_thread = threading.Thread(target=training_loop)
     training_thread.start()
 
-    # Start the GUI main loop
     root.mainloop()
-
 
 if __name__ == '__main__':
     main()
