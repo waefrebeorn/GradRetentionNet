@@ -201,7 +201,7 @@ class OptimizationPlotApp:
             ax.set_yscale('log')
 
         # Animation for dynamic updates
-        self.animations[name] = FuncAnimation(fig, self.animate, fargs=(name,), interval=500, blit=True, cache_frame_data=False)
+        self.animations[name] = FuncAnimation(fig, self.animate, fargs=(name,), interval=500, blit=False, cache_frame_data=False)
 
         # Hover annotation
         self.hover_annotation = ax.annotate("", xy=(0, 0), xytext=(20, 20), textcoords="offset points",
@@ -218,16 +218,17 @@ class OptimizationPlotApp:
                     x_data, y_data = line.get_data()
                     if len(ind["ind"]) > 0:
                         idx = ind["ind"][0]
-                        x, y = x_data[idx], y_data[idx]
-                        self.hover_annotation.xy = (x, y)
-                        self.hover_annotation.set_text(f"{opt}: {y:.4f}")
-                        self.hover_annotation.set_visible(True)
-                        self.figures[name].canvas.draw_idle()
-                        return
+                        if idx < len(x_data) and idx < len(y_data):
+                            x, y = x_data[idx], y_data[idx]
+                            self.hover_annotation.xy = (x, y)
+                            self.hover_annotation.set_text(f"{opt}: {y:.4f}")
+                            self.hover_annotation.set_visible(True)
+                            self.figures[name].canvas.draw_idle()
+                            return
         self.hover_annotation.set_visible(False)
         self.figures[name].canvas.draw_idle()
 
-    def animate(self, _, name):
+    def animate(self, frame, name):
         updated_artists = []
         for opt in self.optimizers:
             data = self.data[name][opt]
@@ -251,15 +252,21 @@ class OptimizationPlotApp:
             if not epoch_means:
                 continue
 
-            self.lines[name][opt].set_ydata(epoch_means)
-            self.error_bars[name][opt].remove()
+            # Adjust x to match the length of epoch_means
+            x = list(range(1, len(epoch_means) + 1))
+            self.lines[name][opt].set_data(x, epoch_means)
+            updated_artists.append(self.lines[name][opt])
+
+            # Remove old error bars and plot new ones
+            if hasattr(self.error_bars[name][opt], 'remove'):
+                self.error_bars[name][opt].remove()
             self.error_bars[name][opt] = self.axes[name].fill_between(
-                range(1, len(epoch_means) + 1),
+                x,
                 [m - s for m, s in zip(epoch_means, epoch_stds)],
                 [m + s for m, s in zip(epoch_means, epoch_stds)],
                 alpha=0.3
             )
-            updated_artists.extend([self.lines[name][opt], self.error_bars[name][opt]])
+            updated_artists.append(self.error_bars[name][opt])
 
             # Dynamically set y-scale based on data
             if 'acc' in name:
@@ -269,6 +276,9 @@ class OptimizationPlotApp:
                     self.axes[name].set_yscale('log')
                 else:
                     self.axes[name].set_yscale('linear')
+
+        # Update the legend to avoid duplicate entries
+        self.axes[name].legend()
 
         return updated_artists
 
@@ -502,8 +512,20 @@ def run_experiment(config_func, train_loader, val_loader, test_loader, device, e
         if scheduler:
             scheduler.step()
 
+        # Handle learning_rates correctly for RescaledSGD
+        if isinstance(optimizer, RescaledSGD):
+            # Assuming all parameters have the same effective_lr; take the mean
+            effective_lrs = []
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    effective_lr = optimizer.state[p].get('effective_lr', torch.full_like(p.data, BASE_LR))
+                    effective_lrs.append(effective_lr.mean().item())
+            mean_effective_lr = np.mean(effective_lrs)
+        else:
+            mean_effective_lr = optimizer.param_groups[0]['lr']
+
         gui_queue.put(('metrics', {
-            'learning_rates': optimizer.param_groups[0]['lr'] if not isinstance(optimizer, RescaledSGD) else optimizer.state[model.fc1.weight]['effective_lr'].mean(),
+            'learning_rates': mean_effective_lr,
             'train_loss': train_loss,
             'val_loss': val_loss,
             'train_acc': train_acc,
@@ -586,30 +608,32 @@ def main():
                 if skip_event.is_set():
                     # If skip_event is set before starting a new optimizer, clear it
                     skip_event.clear()
-
+    
                 app.status_var.set(f"Training with {opt_name} (Trial {trial + 1}/{NUM_TRIALS})")
                 global current_optimizer
                 current_optimizer = opt_name
-
+    
+                # Run the experiment and collect results
                 test_loss, test_acc = run_experiment(
                     config_func, train_loader, val_loader, test_loader, device, EPOCHS, data_queue, trial, skip_event
                 )
-
+    
                 if test_loss is not None and test_acc is not None:
                     results[opt_name].append((test_loss, test_acc))
                     print(f"{opt_name} - Trial {trial + 1} - Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.2f}%")
                 else:
                     print(f"{opt_name} - Trial {trial + 1} - Training skipped or aborted.")
-
+    
         app.status_var.set("Training completed")
-
-        # Display final results
+    
+        # Display final results in a new window
         final_results_window = tk.Toplevel(root)
         final_results_window.title("Final Results")
-
+    
         results_text = tk.Text(final_results_window, height=20, width=50)
         results_text.pack(padx=10, pady=10)
-
+    
+        # Display averaged results for each optimizer
         results_text.insert(tk.END, f"Final Results (averaged over {NUM_TRIALS} trials):\n\n")
         for opt_name, trials in results.items():
             if trials:
@@ -622,9 +646,10 @@ def main():
             else:
                 results_text.insert(tk.END, f"{opt_name}:\n")
                 results_text.insert(tk.END, f"  No successful trials.\n\n")
-
+    
+        # Ensure the text widget is read-only after populating it
         results_text.config(state=tk.DISABLED)
-
+    
     # Start the training thread
     training_thread = threading.Thread(target=training_loop, daemon=True)
     training_thread.start()
