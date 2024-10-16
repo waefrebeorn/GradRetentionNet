@@ -434,7 +434,10 @@ def run_experiment(config_func, train_loader, val_loader, test_loader, device, e
 
     model = model.to(device)
 
-    # Ensure the 'effective_lr' is properly initialized on optimizer switch
+    # Reset any lingering state in the optimizer before starting the training run
+    optimizer.state = defaultdict(dict)
+
+    # Ensure the 'effective_lr' is properly initialized on optimizer switch (if using RescaledSGD)
     initialize_effective_lr(optimizer, BASE_LR)
 
     for epoch in range(1, epochs + 1):
