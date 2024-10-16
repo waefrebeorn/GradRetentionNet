@@ -15,27 +15,31 @@ import threading
 import queue
 from collections import defaultdict
 
-# =======================
-# Constants and Settings
-# =======================
-NUM_PARAMS = 10  # Number of parameters to visualize
-VALUE_RANGE = 0.05  # Range for parameter visualization
-Y_RANGE_MULTIPLIER = 1.0  # Multiplier for y-axis range in plots
-NUM_TRIALS = 3  # Number of trials per optimizer
-EPOCHS = 20  # Number of training epochs
-BATCH_SIZE = 128  # Batch size for DataLoader
-BASE_LR, PEAK_LR = 1e-5, 1e-3  # Learning rates for RescaledSGD
-DECAY = 0.90  # Decay factor for RescaledSGD
-SCALE_FACTOR = 128.0  # Scale factor for gradient scaling (if needed)
+# Constants
+NUM_PARAMS = 10
+HIDDEN_SIZE = 128
+VALUE_RANGE = 0.05
+Y_RANGE_MULTIPLIER = 1.0
+NUM_TRIALS = 3
+EPOCHS = 20
+BATCH_SIZE = 128
+BASE_LR, PEAK_LR = 1e-2, 1e-1  # Adjusted learning rates
+SCALE_FACTOR = 128.0  # Adjusted scale factor for gradient scaling
 
-# Queue for communication between training threads and GUI
+# Queue for communication between training and GUI
 data_queue = queue.Queue()
 
-# =======================
-# Custom Optimizer
-# =======================
+import torch
+import torch.optim as optim
+
+import torch
+import torch.optim as optim
+
+import torch
+import torch.optim as optim
+
 class RescaledSGD(optim.Optimizer):
-    def __init__(self, params, base_lr=1e-7, peak_lr=1e-4, decay=0.99):
+    def __init__(self, params, base_lr=1e-2, peak_lr=1e-1, decay=0.99):
         """
         Initializes the RescaledSGD optimizer.
 
@@ -81,17 +85,17 @@ class RescaledSGD(optim.Optimizer):
                 persistent_grad.mul_(decay).add_(p.grad.data)
 
                 # Compute scaling factors based on min and max parameter updates
-                grad_min, grad_max = persistent_grad.abs().min(), persistent_grad.abs().max()
-                if grad_max != 0 and grad_min != 0:
-                    scaling = (persistent_grad.abs() - grad_min) / (grad_max - grad_min + 1e-8)
+                if persistent_grad.abs().max() != 0 and persistent_grad.abs().min() != 0:
+                    scaling = (persistent_grad.abs() - persistent_grad.abs().min()) / (
+                        persistent_grad.abs().max() - persistent_grad.abs().min() + 1e-8
+                    )
                     scaled_lr = base_lr + (peak_lr - base_lr) * scaling
                     scaled_grad = scaled_lr * persistent_grad.sign()
                 else:
-                    # If gradients are too small, fallback to base learning rate
-                    scaled_grad = persistent_grad * base_lr
-                    scaled_lr = torch.full_like(p.data, base_lr)
+                    scaled_lr = base_lr if persistent_grad.abs().max() == 0 else peak_lr
+                    scaled_grad = persistent_grad * scaled_lr
 
-                # Store the effective learning rates for visualization, ensuring shape consistency
+                # Store the effective learning rates for visualization
                 if 'effective_lr' not in state:
                     state['effective_lr'] = torch.zeros_like(p.data)
                 state['effective_lr'].copy_(scaled_lr)
@@ -99,10 +103,11 @@ class RescaledSGD(optim.Optimizer):
                 # Update parameters
                 p.data.add_(scaled_grad, alpha=-1)
 
+                # Update the group's lr for consistency with schedulers
+                group['lr'] = base_lr
+
         return loss
-# =======================
-# Neural Network Model
-# =======================
+
 class MNISTNet(nn.Module):
     def __init__(self):
         super(MNISTNet, self).__init__()
@@ -127,9 +132,6 @@ class MNISTNet(nn.Module):
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
 
-# =======================
-# GUI for Visualization
-# =======================
 class OptimizationPlotApp:
     def __init__(self, master, optimizers, epochs):
         self.master = master
@@ -147,25 +149,19 @@ class OptimizationPlotApp:
         self.animations = {}
         self.data = defaultdict(lambda: defaultdict(list))
 
-        # Metrics to plot
-        self.metrics = ['learning_rates', 'train_loss', 'val_loss', 'train_acc', 'val_acc']
-
-        for name in self.metrics:
+        for name in ['learning_rates', 'train_loss', 'val_loss', 'train_acc', 'val_acc']:
             for opt in optimizers:
                 self.data[name][opt] = [[] for _ in range(NUM_TRIALS)]  # Initialize list for each trial
             self.create_plot(name)
 
-        # Progress bar
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(master, variable=self.progress_var, maximum=epochs * len(optimizers) * NUM_TRIALS)
         self.progress_bar.pack(fill=tk.X, padx=10, pady=10)
 
-        # Status label
         self.status_var = tk.StringVar()
         self.status_label = ttk.Label(master, textvariable=self.status_var)
         self.status_label.pack()
 
-        # Save button
         self.save_button = ttk.Button(master, text="Save Graphs", command=self.save_graphs)
         self.save_button.pack(pady=10)
 
@@ -194,10 +190,9 @@ class OptimizationPlotApp:
             # Initially set to log scale; handle dynamically in animate
             ax.set_yscale('log')
 
-        # Animation for dynamic updates
+        # Updated FuncAnimation to disable frame data caching to fix the warning
         self.animations[name] = FuncAnimation(fig, self.animate, fargs=(name,), interval=500, blit=True, cache_frame_data=False)
 
-        # Hover annotation
         self.hover_annotation = ax.annotate("", xy=(0, 0), xytext=(20, 20), textcoords="offset points",
                                             bbox=dict(boxstyle="round", fc="w"),
                                             arrowprops=dict(arrowstyle="->"))
@@ -225,6 +220,7 @@ class OptimizationPlotApp:
         updated_artists = []
         for opt in self.optimizers:
             data = self.data[name][opt]
+            # Check if all trials have data for the current epoch
             # Find the minimum length across trials
             min_length = min(len(trial) for trial in data)
             if min_length == 0:
@@ -263,7 +259,7 @@ class OptimizationPlotApp:
                     self.axes[name].set_yscale('log')
                 else:
                     self.axes[name].set_yscale('linear')
-
+        
         return updated_artists
 
     def update_plot(self, name, new_data, trial):
@@ -274,8 +270,8 @@ class OptimizationPlotApp:
             else:
                 print(f"Received data for trial {trial}, but NUM_TRIALS is set to {NUM_TRIALS}")
 
-    def update_progress(self, increment):
-        self.progress_var.set(self.progress_var.get() + increment)
+    def update_progress(self, progress):
+        self.progress_var.set(self.progress_var.get() + progress)
 
     def save_graphs(self):
         directory = filedialog.askdirectory()
@@ -284,14 +280,11 @@ class OptimizationPlotApp:
                 fig.savefig(f"{directory}/{name}.png")
             messagebox.showinfo("Save Complete", "All graphs have been saved.")
 
-# =======================
-# Optimizer Configurations
-# =======================
 def get_rescaled_sgd_config():
     model = MNISTNet()
-    optimizer = RescaledSGD(model.parameters(), base_lr=BASE_LR, peak_lr=PEAK_LR, decay=DECAY)
-    # No StepLR used here; rely on dynamic adjustment
-    return model, optimizer
+    optimizer = RescaledSGD(model.parameters(), base_lr=BASE_LR, peak_lr=PEAK_LR)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+    return model, optimizer, scheduler
 
 def get_sgd_config():
     model = MNISTNet()
@@ -318,29 +311,32 @@ optimizers_config = {
     'Adam': get_adam_config
 }
 
-# =======================
-# Training and Validation
-# =======================
-def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log_interval, gui_queue, trial):
+def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, scale_factor, log_interval, gui_queue, trial):
     model.train()
     train_loss = 0
     correct = 0
     total = 0
-
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()
 
-        # Define a closure that computes the output and loss
-        def closure():
-            optimizer.zero_grad()
-            output = model(data)
-            loss = F.nll_loss(output, target)
-            loss.backward()
-            return loss, output
+        # Scale gradients if applicable
+        if hasattr(optimizer, 'scale_gradients'):
+            optimizer.scale_gradients(scale_factor)
 
-        # Call the closure to get the loss and output
-        loss, output = closure()
-        optimizer.step(lambda: loss)
+        # Forward pass
+        output = model(data)
+        loss = F.nll_loss(output, target)
+
+        # Backward pass
+        loss.backward()
+
+        # Unscale gradients and step optimizer
+        if hasattr(optimizer, 'unscale_gradients'):
+            optimizer.unscale_gradients(scale_factor)
+            optimizer.step()
+        else:
+            optimizer.step()
 
         train_loss += loss.item()
         pred = output.argmax(dim=1, keepdim=True)
@@ -351,18 +347,20 @@ def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
 
-        # Send metrics to GUI for visualization
         if gui_queue:
             with torch.no_grad():
-                params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
-                grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS] if model.fc1.weight.grad is not None else np.zeros(NUM_PARAMS)
-                effective_lr = optimizer.state[model.fc1.weight]['effective_lr'].cpu().numpy().flatten()[:NUM_PARAMS]
+                params = model.fc2.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
+                grads = model.fc2.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS] if model.fc2.weight.grad is not None else np.zeros(NUM_PARAMS)
+                # Retrieve current learning rate from optimizer
+                current_lr = optimizer.param_groups[0]['lr']
+                effective_lr = np.full(NUM_PARAMS, current_lr)
+            # Include trial index in the message
             gui_queue.put(('metrics', {
-                'learning_rates': effective_lr.mean(),
+                'learning_rates': current_lr,
                 'train_loss': train_loss / (batch_idx + 1),
                 'val_loss': 0.0,  # Placeholder; will be updated in run_experiment
                 'train_acc': 100. * correct / total,
-                'val_acc': 0.0  # Placeholder; will be updated in run_experiment
+                'val_acc': 0.0     # Placeholder; will be updated in run_experiment
             }, trial))
 
     return train_loss / len(train_loader), 100. * correct / total
@@ -399,29 +397,17 @@ def test(model, device, test_loader):
     accuracy = 100. * correct / len(test_loader.dataset)
     return test_loss, accuracy
 
-# =======================
-# Experiment Runner
-# =======================
 def run_experiment(config_func, train_loader, val_loader, test_loader, device, epochs, gui_queue, trial):
-    # Unpack model and optimizer, optionally a scheduler if provided
-    model, optimizer, *scheduler_optional = config_func()
-    scheduler = scheduler_optional[0] if scheduler_optional else None
-
+    model, optimizer, scheduler = config_func()
     model = model.to(device)
 
     for epoch in range(1, epochs + 1):
-        # Removed the 'trial' argument from the function call
-        train_loss, train_acc = train_with_custom_scaling(
-            model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=data_queue, trial=trial
-        )
+        train_loss, train_acc = train_with_custom_scaling(model, device, train_loader, optimizer, epoch, SCALE_FACTOR, 100, gui_queue, trial)
         val_loss, val_acc = validate(model, device, val_loader)
-
-        # Only step the scheduler if it exists
-        if scheduler:
-            scheduler.step()
+        scheduler.step()  # Ensure optimizer.step() is called before scheduler.step()
 
         gui_queue.put(('metrics', {
-            'learning_rates': optimizer.param_groups[0]['lr'],
+            'learning_rates': scheduler.get_last_lr()[0],
             'train_loss': train_loss,
             'val_loss': val_loss,
             'train_acc': train_acc,
@@ -432,11 +418,6 @@ def run_experiment(config_func, train_loader, val_loader, test_loader, device, e
     test_loss, test_acc = test(model, device, test_loader)
     return test_loss, test_acc
 
-
-
-# =======================
-# Main Function
-# =======================
 def main():
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -445,13 +426,11 @@ def main():
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = True
 
-    # Data transformations
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
     ])
 
-    # Download and prepare datasets
     full_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
     test_dataset = datasets.MNIST('./data', train=False, transform=transform)
 
@@ -459,20 +438,18 @@ def main():
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
-    # DataLoaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 
-    # Initialize GUI
     root = tk.Tk()
     app = OptimizationPlotApp(root, optimizers=list(optimizers_config.keys()), epochs=EPOCHS)
 
-    # Function to handle incoming data from the training thread
     def handle_queue():
         try:
             while not data_queue.empty():
                 msg = data_queue.get_nowait()
+                # Check the length of the message to differentiate between types
                 if len(msg) == 3:
                     msg_type, data, trial = msg
                     if msg_type == 'metrics':
@@ -486,13 +463,8 @@ def main():
                     print(f"Invalid message format: {msg}")
         except queue.Empty:
             pass
-        # Schedule the next queue check
         root.after(100, handle_queue)
-
-    # Start handling the queue
-    root.after(100, handle_queue)
-
-    # Training loop in a separate thread
+    
     def training_loop():
         results = defaultdict(list)
         for trial in range(NUM_TRIALS):
@@ -525,11 +497,9 @@ def main():
 
         results_text.config(state=tk.DISABLED)
 
-    # Start the training thread
     training_thread = threading.Thread(target=training_loop)
     training_thread.start()
 
-    # Start the GUI main loop
     root.mainloop()
 
 if __name__ == '__main__':
