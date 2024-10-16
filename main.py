@@ -35,7 +35,7 @@ data_queue = queue.Queue()
 # Custom Optimizer
 # =======================
 class RescaledSGD(optim.Optimizer):
-    def __init__(self, params, base_lr=1e-7, peak_lr=1e-4, decay=0.99):
+    def __init__(self, params, base_lr=1e-5, peak_lr=1e-3, decay=0.90):
         """
         Initializes the RescaledSGD optimizer.
 
@@ -329,6 +329,9 @@ def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log
     correct = 0
     total = 0
 
+    # Ensure 'effective_lr' is initialized for all parameters before training
+    initialize_effective_lr(optimizer, BASE_LR)
+
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
 
@@ -358,7 +361,13 @@ def train_with_custom_scaling(model, device, train_loader, optimizer, epoch, log
             with torch.no_grad():
                 params = model.fc1.weight.data.cpu().numpy().flatten()[:NUM_PARAMS]
                 grads = model.fc1.weight.grad.data.cpu().numpy().flatten()[:NUM_PARAMS] if model.fc1.weight.grad is not None else np.zeros(NUM_PARAMS)
-                effective_lr = optimizer.state[model.fc1.weight]['effective_lr'].cpu().numpy().flatten()[:NUM_PARAMS]
+
+                # Safely access 'effective_lr' with a fallback value after initialization
+                effective_lr = optimizer.state.get(model.fc1.weight, {}).get(
+                    'effective_lr',
+                    torch.full_like(model.fc1.weight.data, BASE_LR)
+                ).cpu().numpy().flatten()[:NUM_PARAMS]
+
             gui_queue.put(('metrics', {
                 'learning_rates': effective_lr.mean(),
                 'train_loss': train_loss / (batch_idx + 1),
@@ -404,6 +413,20 @@ def test(model, device, test_loader):
 # =======================
 # Experiment Runner
 # =======================
+def initialize_effective_lr(optimizer, base_lr):
+    """
+    Ensures that the 'effective_lr' state is initialized for all parameters
+    in the given optimizer.
+    """
+    for group in optimizer.param_groups:
+        for p in group['params']:
+            state = optimizer.state[p]
+            if 'effective_lr' not in state:
+                state['effective_lr'] = torch.full_like(p.data, base_lr)
+
+# =======================
+# Training Loop Adjustment for Optimizer Switch
+# =======================
 def run_experiment(config_func, train_loader, val_loader, test_loader, device, epochs, gui_queue, trial):
     # Unpack model and optimizer, optionally a scheduler if provided
     model, optimizer, *scheduler_optional = config_func()
@@ -411,14 +434,15 @@ def run_experiment(config_func, train_loader, val_loader, test_loader, device, e
 
     model = model.to(device)
 
+    # Ensure the 'effective_lr' is properly initialized on optimizer switch
+    initialize_effective_lr(optimizer, BASE_LR)
+
     for epoch in range(1, epochs + 1):
-        # Removed the 'trial' argument from the function call
         train_loss, train_acc = train_with_custom_scaling(
-            model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=data_queue, trial=trial
+            model, device, train_loader, optimizer, epoch, log_interval=100, gui_queue=gui_queue, trial=trial
         )
         val_loss, val_acc = validate(model, device, val_loader)
 
-        # Only step the scheduler if it exists
         if scheduler:
             scheduler.step()
 
