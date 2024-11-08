@@ -76,7 +76,7 @@ def test(model):
     return accuracy
 
 # Train and test each optimizer
-num_epochs = 5
+num_epochs = 25
 print("Training with EnhancedSGD...")
 loss_enhanced_sgd = train(model_enhanced_sgd, optimizer_enhanced_sgd, num_epochs=num_epochs)
 print("\nTraining with SGD...")
