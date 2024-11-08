@@ -34,6 +34,7 @@ REM Create a requirements.txt file if it does not exist
 echo torch > requirements.txt
 echo torchvision >> requirements.txt
 echo matplotlib >> requirements.txt
+echo scipy >> requirements.txt
 
 REM Install the appropriate version of PyTorch based on CUDA availability
 if /i "%cuda_version%" == "CPU" (
@@ -58,6 +59,10 @@ pip install -r requirements.txt
 REM Download the MNIST dataset
 echo Downloading MNIST dataset...
 python -c "from torchvision import datasets; datasets.MNIST('./data', train=True, download=True); datasets.MNIST('./data', train=False, download=True)"
+
+REM Download the CIFAR-10 dataset
+echo Downloading CIFAR-10 dataset...
+python -c "from torchvision import datasets; datasets.CIFAR10('./data', train=True, download=True); datasets.CIFAR10('./data', train=False, download=True)"
 
 echo Setup complete. You can now run the main.py script.
 pause
