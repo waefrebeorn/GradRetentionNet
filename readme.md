@@ -1,151 +1,165 @@
-# GradRetentionNet
+# GradRetentionNet: Dynamic Gradient Retention and Optimization Framework for Enhanced Model Convergence
 
+GradRetentionNet is a cutting-edge framework designed to explore advanced optimization strategies in deep learning, integrating a unique approach to gradient retention and optimizer control through **EnhancedSGD**. Leveraging Q-learning-based adaptive adjustments, gradient variance tracking, and Bayesian parameter initialization, EnhancedSGD facilitates faster and more stable convergence across diverse neural network models. This framework is suited for researchers interested in advanced model training analysis, providing detailed logging, memory efficiency, and comparative insights across multiple optimizers and datasets.
 
-## Overview
+## Table of Contents
+1. [Introduction](#introduction)
+2. [EnhancedSGD: Reinforcement-Learning-Based Optimizer](#enhancedsgd-reinforcement-learning-based-optimizer)
+3. [Core Equations](#core-equations)
+4. [Features](#features)
+5. [Supported Datasets and Models](#supported-datasets-and-models)
+6. [Installation](#installation)
+7. [Usage](#usage)
+8. [Experiments and Results](#experiments-and-results)
+9. [Acknowledgements](#acknowledgements)
 
-**GradRetentionNet** is a pioneering project that introduces the **RescaledSGD** optimizer, inspired by the **Retention Net** concept. This custom optimizer dynamically adjusts learning rates based on gradient magnitudes, enhancing the training efficiency and performance of neural networks. By retaining and scaling gradients, **RescaledSGD** offers a more adaptive optimization strategy compared to the traditional **Stochastic Gradient Descent (SGD)**.
+---
 
-The project includes a user-friendly graphical interface built with Tkinter, allowing real-time visualization of parameter updates, gradients, and effective learning rates during the training process. This visual feedback aids in understanding the optimization dynamics and the impact of the RescaledSGD optimizer.
+## Introduction
+
+Optimization is central to machine learning, impacting training speed, convergence stability, and model performance. GradRetentionNet addresses limitations in traditional optimizers by introducing **EnhancedSGD**—a novel optimizer that combines elements of **Q-learning** and **stochastic gradient descent (SGD)** to improve adaptability. Using dynamic adjustments based on gradient variance and learning rate scaling, EnhancedSGD is designed to adapt to diverse tasks, especially in noisy or complex data environments. This framework supports popular datasets and models for image classification, sentiment analysis, and segmentation, allowing for comprehensive testing across both vision and NLP domains.
+
+---
+
+## EnhancedSGD: Reinforcement-Learning-Based Optimizer
+
+EnhancedSGD is the foundation of GradRetentionNet’s optimization approach, aiming to stabilize and accelerate convergence through adaptive learning strategies:
+
+1. **Q-Learning-Based Adjustments**: EnhancedSGD integrates a **Q-Learning Controller** that adaptively adjusts learning rate (`lr_scale`), momentum (`momentum_scale`), and gradient scaling (`grad_scale`) based on training state variables such as **loss** and **gradient variance**. This controller operates through epsilon-greedy action selection, optimizing for actions that maximize stability and performance:
+   \[
+   Q(s, a) \leftarrow Q(s, a) + \alpha \left[ r + \gamma \max_{a'} Q(s', a') - Q(s, a) \right]
+   \]
+   where \( Q(s, a) \) is the expected reward for taking action \( a \) in state \( s \), \( \alpha \) is the learning rate, and \( \gamma \) is the discount factor.
+
+2. **Gradient Variance Tracking**: By calculating the **gradient variance** with an exponential moving average, EnhancedSGD can assess model stability and adjust the learning rate accordingly. This helps mitigate issues where gradients become unstable, leading to improved convergence rates:
+   \[
+   \sigma^2_{\text{grad}} \leftarrow \beta \sigma^2_{\text{grad}} + (1 - \beta) \text{Var}(g)
+   \]
+   where \( \sigma^2_{\text{grad}} \) is the smoothed variance, \( \beta \) is the smoothing factor, and \( \text{Var}(g) \) represents the variance of gradients.
+
+3. **Adaptive Clipping and Noise Injection**: EnhancedSGD incorporates **adaptive gradient clipping** based on gradient variance and **Bayesian noise injection** to prevent overfitting and improve generalization, especially in complex datasets.
+
+4. **Bayesian Parameter Initialization**: To improve exploration during training, parameters are initialized using a normal distribution based on initial values:
+   \[
+   \theta \sim \mathcal{N}(\mu, \sigma^2)
+   \]
+   where \( \mu \) is the initial parameter value, and \( \sigma \) controls variability, helping avoid local minima in the loss landscape.
+
+---
+
+## Core Equations
+
+**1. Q-Learning Update Rule**  
+In EnhancedSGD, the Q-Learning Controller uses an update rule to optimize parameter adjustments:
+\[
+Q(s, a) = Q(s, a) + \alpha \left( r + \gamma \max_{a'} Q(s', a') - Q(s, a) \right)
+\]
+where:
+- \( Q(s, a) \) is the quality of action \( a \) in state \( s \),
+- \( \alpha \) is the learning rate of the Q-learning agent,
+- \( \gamma \) is the discount factor for future rewards,
+- \( r \) is the reward obtained after taking action \( a \),
+- \( s' \) is the next state, and \( a' \) is the optimal action in \( s' \).
+
+**2. Gradient Variance-Based Learning Rate Adjustment**
+To scale the learning rate based on gradient variance, EnhancedSGD calculates:
+\[
+\text{effective\_lr} = \text{lr} \times \left(1 \pm \frac{\Delta \sigma^2_{\text{grad}}}{\sigma^2_{\text{grad}}}\right)
+\]
+where \( \sigma^2_{\text{grad}} \) is the smoothed gradient variance.
+
+**3. Bayesian Noise Injection**  
+Bayesian initialization helps explore parameter space:
+\[
+\theta \sim \mathcal{N}(\mu, \sigma^2)
+\]
+where each parameter \( \theta \) is initialized with a variance based on the Bayesian prior.
+
+---
 
 ## Features
 
-- **RescaledSGD Optimizer**: Implements a gradient retention and dynamic learning rate scaling mechanism.
-- **Real-Time Visualization**: Interactive GUI to monitor parameter changes, gradients, and effective learning rates.
-- **Comparison with Standard SGD**: Demonstrates the advantages of RescaledSGD over traditional SGD on the MNIST dataset.
-- **User Controls**: Adjustable learning rate settings and scaling parameters to experiment with optimization behavior.
-- **Threaded Training**: Ensures a responsive GUI by running the training process in a separate thread.
+1. **Flexible Dataset Loading**: Supports both Hugging Face datasets and CSV-based loading, ensuring broad applicability across different research settings.
+2. **Memory and Gradient Tracking**: Real-time tracking of VRAM/RAM usage, gradient mean, and gradient variance per batch and epoch.
+3. **Grad-CAM Visualization**: Visualizations for segmentation tasks to highlight the regions influencing model decisions.
+4. **Multi-Optimizer Support**: Compare EnhancedSGD with standard optimizers (SGD, Adam, RMSprop) across various datasets.
+5. **Comprehensive Logging and Analytics**: Extensive logging options to track test accuracy, memory changes, epoch times, and gradient variance over time.
 
-## Getting Started
+---
 
-### Prerequisites
+## Supported Datasets and Models
 
-Ensure you have the following installed:
+GradRetentionNet accommodates a wide range of tasks, allowing for extensive analysis across different data domains.
 
-- **Python 3.6 or higher**
-- **pip** (Python package installer)
+### Datasets
+- **MNIST** (Image Classification)
+- **CIFAR-10** (Image Classification)
+- **IMDB** (Sentiment Analysis)
+- **AG_NEWS** (Topic Classification)
+- **Pascal VOC** (Image Segmentation)
 
-### Installation
+### Models
+- **SimpleCNN** (for MNIST, CIFAR-10)
+- **BERT-based TextClassifier** (for IMDB, AG_NEWS)
+- **SimpleUNet** (for Pascal VOC segmentation)
 
-1. **Clone the Repository**
+---
 
+## Installation
+
+1. **Clone the Repository**:
    ```bash
    git clone https://github.com/waefrebeorn/GradRetentionNet.git
    cd GradRetentionNet
    ```
 
-2. **Create a Virtual Environment (Optional but Recommended)**
-
+2. **Set Up Virtual Environment**:
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   source venv/bin/activate  # On Windows, use venv\Scripts\activate
    ```
 
-3. **Install Dependencies**
-
+3. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-   *If `requirements.txt` is not provided, install the necessary packages manually:*
+4. **Prepare Datasets**:
+   Place preprocessed CSV files in the `data/` directory for IMDB and AG_NEWS.
 
-   ```bash
-   pip install torch torchvision matplotlib
-   ```
-
-   *Note: `tkinter` is typically included with standard Python installations. If not, install it based on your operating system.*
-
-### Running the Application
-
-Execute the main script to start training and launch the GUI:
-
-```bash
-python main.py
-```
-
-Upon running, a GUI window will appear, displaying real-time graphs of parameter updates, gradients, and effective learning rates for both **RescaledSGD** and **StandardSGD** optimizers.
+---
 
 ## Usage
 
-The GUI provides several interactive controls to customize the training visualization:
-
-- **Learning Rate Slider**: Adjusts the effective learning rate manually.
-- **Retain Minimum Scaling**: Toggles whether to retain the minimum scaling factor in learning rate adjustments.
-- **Base Learning Rate Input**: Sets the base learning rate (`base_lr`) for **RescaledSGD**.
-- **Y-Range Multiplier Input**: Modifies the Y-axis scaling for better visualization.
-
-These controls allow users to experiment with different optimization settings and observe their effects in real-time.
-
-## RescaledSGD Optimizer
-
-The **RescaledSGD** optimizer is the core innovation of this project, embodying the **Retention Net** idea. Here's how it works:
-
-1. **Gradient Retention**: Instead of discarding gradients after each update, **RescaledSGD** retains a persistent gradient that decays over time. This retention helps in smoothing out gradient fluctuations and maintaining a memory of past gradients.
-
-2. **Dynamic Learning Rate Scaling**:
-   - **Base Learning Rate (`base_lr`)**: The minimum learning rate applied to parameters with the smallest gradients.
-   - **Peak Learning Rate (`peak_lr`)**: The maximum learning rate applied to parameters with the largest gradients.
-   - **Scaling Mechanism**: For each parameter, the effective learning rate is scaled between `base_lr` and `peak_lr` based on the relative magnitude of its retained gradient. This ensures that parameters with larger gradients receive larger updates, facilitating faster convergence.
-
-3. **Decay Factor (`decay`)**: Controls the rate at which the retained gradients decay over time, influencing the optimizer's sensitivity to recent gradient information.
-
-**Benefits of RescaledSGD**:
-
-- **Adaptive Updates**: Tailors the learning rate for each parameter individually, enhancing optimization efficiency.
-- **Improved Convergence**: Facilitates faster and more stable convergence by balancing aggressive and conservative updates based on gradient magnitudes.
-- **Enhanced Generalization**: Demonstrated better performance on validation and test datasets compared to standard SGD, indicating improved generalization capabilities.
-
-## Results
-
-In 10 Epoch experiments conducted on the MNIST dataset, **RescaledSGD** significantly outperformed **StandardSGD**:
-
-- **Validation Accuracy**: Achieved up to 92% accuracy with **RescaledSGD**, compared to 70% with **StandardSGD**.
-- **Test Accuracy**: Reached 92% on the test set using **RescaledSGD**, whereas **StandardSGD** only achieved 70%.
-- **Loss Metrics**: Consistently lower validation and test loss values with **RescaledSGD**, indicating better model performance and generalization.
-
-These results underscore the effectiveness of the gradient retention and dynamic learning rate scaling mechanisms in **RescaledSGD**.
-
-## Repository
-
-Access the project repository here: [GradRetentionNet](https://github.com/waefrebeorn/GradRetentionNet)
-
-## Credits
-
-- **WuBu WaefreBeorn**: Project lead, implementation, and bug fixes.
-- **Kalomaze**: Conceptual ideas and guidance for prompting the creation of the RescaledSGD optimizer.
-- **OpenAI's ChatGPT**: Assisted in code generation and optimization discussions.
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request for any enhancements, bug fixes, or suggestions.
-
-1. **Fork the Repository**
-2. **Create a Feature Branch**
-
+1. **Run Main Script**:
    ```bash
-   git checkout -b feature/YourFeature
+   python main.py
    ```
+   Select datasets and optimizers through command prompts or specify `all` to run all configurations.
 
-3. **Commit Your Changes**
+2. **Result Logs and Visualizations**:
+   Results are saved to `results/`, providing detailed analytics for each experiment run. This includes metrics for test accuracy, training loss, memory usage, and time per epoch.
 
-   ```bash
-   git commit -m "Add Your Feature"
-   ```
+---
 
-4. **Push to the Branch**
+## Experiments and Results
 
-   ```bash
-   git push origin feature/YourFeature
-   ```
+The primary experimental focus in GradRetentionNet is on:
+- **Training Efficiency**: Testing optimizer performance across datasets.
+- **Memory Usage**: Monitoring VRAM/RAM during model training.
+- **Adaptive Learning Dynamics**: Evaluating the impact of EnhancedSGD’s dynamic learning rate and gradient variance tracking on convergence stability.
+- **Visual Explanations**: Grad-CAM results highlight regions of focus in segmentation tasks.
 
-5. **Open a Pull Request**
+EnhancedSGD has shown improvements in convergence speed and memory stability, especially in complex datasets like Pascal VOC and AG_NEWS, due to its unique handling of gradient variance.
 
-## License
+---
 
-This project is licensed under the [MIT License](LICENSE).
+## Acknowledgements
 
-## Acknowledgments
+Special thanks to **Hugging Face** for their datasets library, which enabled seamless integration of NLP datasets like IMDB and AG_NEWS. **PyTorch** provided the foundation for model implementation, while **SciPy** supported Bayesian sampling for optimizer initialization. Our approach was also inspired by reinforcement learning techniques in optimization research, making EnhancedSGD an example of applying **Q-learning** in practical, scalable scenarios.
 
-- **PyTorch**: For providing a robust deep learning framework.
-- **Tkinter & Matplotlib**: For enabling effective data visualization.
-- **MNIST Dataset**: For serving as a benchmark dataset for evaluation.
+---
 
+GradRetentionNet is designed as a robust platform for experimentation and research in optimization. The project showcases innovative strategies to control gradient variance and retain stability during training, making it suitable for researchers aiming to improve model convergence under challenging conditions.
+
+MIT LICENSE
