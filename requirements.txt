@@ -1,4 +1,10 @@
-torch 
-torchvision 
-matplotlib 
-scipy 
+torch
+torchvision
+datasets
+transformers
+tokenizers
+matplotlib
+scipy
+tensorboard
+psutil
+opencv-python

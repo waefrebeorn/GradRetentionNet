@@ -10,31 +10,50 @@ if not exist "venv" (
 REM Activate the virtual environment
 call venv\Scripts\activate
 
+REM Upgrade pip to the latest version
+echo Upgrading pip...
+pip install --upgrade pip
+
 REM Check for CUDA version using nvcc
 echo Checking for CUDA support using nvcc...
-nvcc --version > cuda_check.txt
+nvcc --version > cuda_check.txt 2>nul
 
-REM Read the CUDA version from nvcc output
-set "cuda_version=CPU"
-for /f "tokens=5 delims= " %%A in ('findstr /r /c:"release" cuda_check.txt') do (
-    set "cuda_version=%%A"
+REM Check if nvcc command was successful
+if %errorlevel% NEQ 0 (
+    echo CUDA not found. Setting CUDA version to CPU.
+    set "cuda_version=CPU"
+) else (
+    REM Read the CUDA version from nvcc output
+    set "cuda_version=CPU"
+    for /f "tokens=5 delims= " %%A in ('findstr /r /c:"release" cuda_check.txt') do (
+        set "cuda_version=%%A"
+    )
+    
+    REM Extract only the major and minor version (e.g., 12.4) and remove any trailing commas or extra characters
+    for /f "tokens=1,2 delims=." %%A in ("%cuda_version:,=%") do (
+        set "cuda_version_major=%%A"
+        set "cuda_version_minor=%%B"
+    )
+    set "cuda_version=%cuda_version_major%.%cuda_version_minor%"
 )
-
-REM Extract only the major and minor version (e.g., 12.4) and remove any trailing commas or extra characters
-for /f "tokens=1,2 delims=." %%A in ("%cuda_version:,=%") do (
-    set "cuda_version_major=%%A"
-    set "cuda_version_minor=%%B"
-)
-set "cuda_version=%cuda_version_major%.%cuda_version_minor%"
 
 REM Display detected CUDA information
 echo CUDA Version Detected: %cuda_version%
 
-REM Create a requirements.txt file if it does not exist
-echo torch > requirements.txt
-echo torchvision >> requirements.txt
-echo matplotlib >> requirements.txt
-echo scipy >> requirements.txt
+REM Create or overwrite the requirements.txt file
+echo Creating requirements.txt...
+(
+    echo torch
+    echo torchvision
+    echo datasets
+    echo transformers
+    echo tokenizers
+    echo matplotlib
+    echo scipy
+    echo tensorboard
+    echo psutil
+    echo opencv-python
+) > requirements.txt
 
 REM Install the appropriate version of PyTorch based on CUDA availability
 if /i "%cuda_version%" == "CPU" (
@@ -51,10 +70,27 @@ if /i "%cuda_version%" == "CPU" (
 )
 
 REM Cleanup the CUDA check file
-del cuda_check.txt
+if exist cuda_check.txt del cuda_check.txt
 
-REM Install other necessary libraries
+REM Install other necessary libraries from requirements.txt
+echo Installing other dependencies from requirements.txt...
 pip install -r requirements.txt
+
+REM Verify installation of transformers
+echo Verifying installation of transformers...
+pip show transformers >nul 2>&1
+if %errorlevel% NEQ 0 (
+    echo transformers not found. Installing transformers...
+    pip install transformers
+    if %errorlevel% NEQ 0 (
+        echo Failed to install transformers. Please check the error messages above.
+        pause
+        exit /b 1
+    )
+) else (
+    echo transformers is already installed.
+)
+
 
 REM Download the MNIST dataset
 echo Downloading MNIST dataset...
@@ -64,5 +100,19 @@ REM Download the CIFAR-10 dataset
 echo Downloading CIFAR-10 dataset...
 python -c "from torchvision import datasets; datasets.CIFAR10('./data', train=True, download=True); datasets.CIFAR10('./data', train=False, download=True)"
 
+REM Download the IMDB dataset using Hugging Face's datasets library
+echo Downloading IMDB dataset...
+python -c "from datasets import load_dataset; load_dataset('imdb', split='train').to_pandas().to_csv('./data/imdb_train.csv'); load_dataset('imdb', split='test').to_pandas().to_csv('./data/imdb_test.csv')"
+
+REM Download the AG_NEWS dataset using Hugging Face's datasets library
+echo Downloading AG_NEWS dataset...
+python -c "from datasets import load_dataset; load_dataset('ag_news', split='train').to_pandas().to_csv('./data/ag_news_train.csv'); load_dataset('ag_news', split='test').to_pandas().to_csv('./data/ag_news_test.csv')"
+
+REM Download the Pascal VOC dataset
+echo Downloading Pascal VOC dataset...
+python -c "from torchvision import datasets; datasets.VOCSegmentation(root='./data', year='2012', image_set='train', download=True); datasets.VOCSegmentation(root='./data', year='2012', image_set='val', download=True)"
+
+
+REM Inform the user that setup is complete
 echo Setup complete. You can now run the main.py script.
 pause
