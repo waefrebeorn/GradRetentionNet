@@ -327,60 +327,43 @@ def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5
         vram_start, ram_start = track_memory()
         running_loss = 0.0
 
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
+        for batch_idx, batch in enumerate(train_loader):
+            if dataset_name.lower() in ["imdb", "ag_news"]:
+                # Handle text classification batches
+                input_ids, attention_mask, labels = batch
+                input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
+                
+                output = model(input_ids=input_ids, attention_mask=attention_mask)
+                # Check if output has logits attribute or is a tensor directly
+                logits = output.logits if hasattr(output, "logits") else output
+                loss = nn.CrossEntropyLoss()(logits, labels)
+            else:
+                # For other datasets, we expect standard (data, target) tuples
+                data, target = batch
+                data, target = data.to(device), target.to(device)
 
-            # Adjust target for segmentation
-            if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
-                target = target.squeeze(1).long()  # Remove channel dimension for segmentation
-
-            optimizer.zero_grad()
-            output = model(data)
-
-            # Compute loss
-            try:
                 if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
-                    if isinstance(output, torch.Tensor):
-                        output_tensor = output
-                    else:
-                        raise TypeError(f"Expected tensor output for VOC, got {type(output)}")
+                    target = target.squeeze(1).long()
+                
+                output = model(data)
+                loss = nn.CrossEntropyLoss()(output, target)
 
-                    assert isinstance(output_tensor, torch.Tensor), f"Expected tensor, got {type(output_tensor)}"
-                    assert output_tensor.dim() == 4, f"Expected 4D output tensor, got {output_tensor.dim()}D"
-                    assert output_tensor.shape[1] == 21, f"Expected 21 classes for VOC, got {output_tensor.shape[1]}"
-                    assert output_tensor.shape[2:] == target.shape[1:], (
-                        f"Output spatial dimensions {output_tensor.shape[2:]} do not match target {target.shape[1:]}"
-                    )
-                    assert target.dtype == torch.long, f"Expected target dtype torch.long, got {target.dtype}"
+            # Backpropagation and optimizer step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-                    loss = nn.CrossEntropyLoss()(output_tensor, target)
-                else:
-                    if not isinstance(output, torch.Tensor):
-                        raise TypeError(f"Expected tensor output, got {type(output)}")
-                    loss = nn.CrossEntropyLoss()(output, target)
-
-                loss_value = loss.item()
-                running_loss += loss_value
-
-                # Backpropagation and optimization step
-                loss.backward()
-                optimizer.step()
-
-            except Exception as e:
-                print(f"Error during loss computation or backpropagation: {e}")
-                if 'str' in str(e).lower():
-                    print("[Error Trace] A 'str' type was detected in tensor operations.")
-                continue
+            # Track running loss
+            running_loss += loss.item()
 
             # Print batch details every 'log_interval' batches
             if batch_idx % log_interval == 0 or batch_idx == len(train_loader) - 1:
-                print(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], "
-                      f"Batch Loss: {loss_value:.4f}")
+                print(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Batch Loss: {loss.item():.4f}")
 
         # Calculate average loss and log test accuracy
         epoch_loss = running_loss / len(train_loader)
         train_losses.append(epoch_loss)
-        test_accuracy = test_epoch(model, test_loader, dataset_name)
+        test_accuracy = test_epoch(model, test_loader, dataset_name, log_interval=log_interval)
         test_accuracies.append(test_accuracy)
 
         # Track memory and time
@@ -389,7 +372,6 @@ def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5
         epoch_times.append(epoch_time)
         memory_usage.append((vram_end - vram_start, ram_end - ram_start))
 
-        # Print epoch summary
         print(f"Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
         print(f"Memory Usage - VRAM Change: {vram_end - vram_start:.2f} MB, RAM Change: {ram_end - ram_start:.2f} MB")
 
