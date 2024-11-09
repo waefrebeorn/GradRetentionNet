@@ -53,6 +53,7 @@ echo Creating requirements.txt...
     echo tensorboard
     echo psutil
     echo opencv-python
+	echo scikit-learn
 ) > requirements.txt
 
 REM Install the appropriate version of PyTorch based on CUDA availability
