@@ -121,20 +121,6 @@ class SimpleUNet(nn.Module):
             return output['out']
         return output
 
-# ----------------------- Dataset Utilities -----------------------
-def dataset_exists(dataset_name):
-    data_path = "./data"
-    if dataset_name == "MNIST":
-        return os.path.exists(os.path.join(data_path, "MNIST"))
-    elif dataset_name == "CIFAR10":
-        return os.path.exists(os.path.join(data_path, "cifar-10-batches-py"))
-    elif dataset_name in ["IMDB", "AG_NEWS"]:
-        return os.path.exists(os.path.join(data_path, f"{dataset_name.lower()}_train.csv")) and \
-               os.path.exists(os.path.join(data_path, f"{dataset_name.lower()}_test.csv"))
-    elif dataset_name == "VOC":
-        return os.path.exists(os.path.join(data_path, "VOCdevkit", "VOC2012"))
-    return False
-
 # ----------------------- Grad-CAM Implementation -----------------------
 class GradCAM:
     """
@@ -222,6 +208,12 @@ def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5
     model.train()
     train_losses, test_accuracies, epoch_times, memory_usage = [], [], [], []
 
+    # Add histories for EnhancedSGD
+    learning_rate_history = []
+    gradient_variance_history = []
+    entropy_history = []
+    mix_prob_history = []
+
     for epoch in range(1, num_epochs + 1):
         start_time = time.time()
         vram_start, ram_start = track_memory()
@@ -253,9 +245,28 @@ def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5
                     output = model(data)
                     loss = nn.CrossEntropyLoss()(output, target)
 
-                # Backpropagation and optimizer step
+                # Backpropagation
                 loss.backward()
-                optimizer.step()
+
+                # Dynamically check for 'current_epoch' support
+                if isinstance(optimizer, EnhancedSGD):
+                    optimizer.step(closure=None, current_epoch=epoch)
+                else:
+                    optimizer.step()
+
+                # If using EnhancedSGD, capture its internal histories safely
+                if isinstance(optimizer, EnhancedSGD):
+                    # Check if these lists exist before accessing
+                    learning_rate = optimizer.state.get('lr_history', [optimizer.param_groups[0]['lr']])
+                    learning_rate_history.append(learning_rate[-1] if learning_rate else optimizer.param_groups[0]['lr'])
+
+                    gradient_variance_history.append(getattr(optimizer, 'grad_var', 0.0))
+
+                    entropy = optimizer.state.get('entropy_history', [0.0])
+                    entropy_history.append(entropy[-1] if entropy else 0.0)
+
+                    mix_prob = getattr(optimizer.q_controller, 'mix_prob', 0.0) if hasattr(optimizer, 'q_controller') else 0.0
+                    mix_prob_history.append(mix_prob)
 
                 # Track running loss
                 running_loss += loss.item()
@@ -283,7 +294,23 @@ def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5
         print(f"Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
         print(f"Memory Usage - VRAM Change: {vram_end - vram_start:.2f} MB, RAM Change: {ram_end - ram_start:.2f} MB")
 
-    return train_losses, test_accuracies, epoch_times, memory_usage
+    # Return results with EnhancedSGD-specific histories if applicable
+    results = {
+        "loss": train_losses,
+        "accuracy": test_accuracies,
+        "epoch_time": epoch_times,
+        "memory_usage": memory_usage
+    }
+
+    if isinstance(optimizer, EnhancedSGD):
+        results.update({
+            "learning_rate": learning_rate_history,
+            "gradient_variance": gradient_variance_history,
+            "entropy": entropy_history,
+            "mix_prob": mix_prob_history
+        })
+
+    return results
 
 def test_epoch(model, test_loader, dataset_name="VOC", log_interval=50):
     model.eval()
@@ -340,17 +367,17 @@ def test_epoch(model, test_loader, dataset_name="VOC", log_interval=50):
 def plot_results(num_epochs, results, dataset_name):
     """
     Plots the training loss, test accuracy, learning rate, gradient variance,
-    epoch times, and memory usage for each optimizer.
+    entropy, mix_prob, epoch times, and memory usage for each optimizer.
 
     Parameters:
         num_epochs (int): Number of epochs.
         results (dict): Dictionary containing lists of metrics for each optimizer.
         dataset_name (str): Name of the dataset being plotted.
     """
-    plt.figure(figsize=(20, 15))
+    plt.figure(figsize=(25, 20))
 
     # Training Loss Comparison
-    plt.subplot(3, 2, 1)
+    plt.subplot(4, 2, 1)
     for optimizer_name, data in results.items():
         if 'loss' in data:
             plt.plot(range(1, num_epochs + 1), data['loss'], label=optimizer_name)
@@ -360,7 +387,7 @@ def plot_results(num_epochs, results, dataset_name):
     plt.legend()
 
     # Test Accuracy Comparison
-    plt.subplot(3, 2, 2)
+    plt.subplot(4, 2, 2)
     for optimizer_name, data in results.items():
         if 'accuracy' in data:
             plt.plot(range(1, num_epochs + 1), data['accuracy'], label=optimizer_name)
@@ -370,7 +397,7 @@ def plot_results(num_epochs, results, dataset_name):
     plt.legend()
 
     # Learning Rate over Batches (EnhancedSGD only)
-    plt.subplot(3, 2, 3)
+    plt.subplot(4, 2, 3)
     for optimizer_name, data in results.items():
         if 'learning_rate' in data and optimizer_name == "EnhancedSGD":
             plt.plot(range(1, len(data['learning_rate']) + 1), data['learning_rate'], label=optimizer_name)
@@ -380,7 +407,7 @@ def plot_results(num_epochs, results, dataset_name):
     plt.legend()
 
     # Gradient Variance over Batches (EnhancedSGD only)
-    plt.subplot(3, 2, 4)
+    plt.subplot(4, 2, 4)
     for optimizer_name, data in results.items():
         if 'gradient_variance' in data and optimizer_name == "EnhancedSGD":
             plt.plot(range(1, len(data['gradient_variance']) + 1), data['gradient_variance'], label=optimizer_name)
@@ -389,8 +416,28 @@ def plot_results(num_epochs, results, dataset_name):
     plt.title(f"{dataset_name} - Gradient Variance over Batches (EnhancedSGD)")
     plt.legend()
 
+    # Entropy over Batches (EnhancedSGD only)
+    plt.subplot(4, 2, 5)
+    for optimizer_name, data in results.items():
+        if 'entropy' in data and optimizer_name == "EnhancedSGD":
+            plt.plot(range(1, len(data['entropy']) + 1), data['entropy'], label=optimizer_name)
+    plt.xlabel("Batch")
+    plt.ylabel("Gradient Entropy")
+    plt.title(f"{dataset_name} - Gradient Entropy over Batches (EnhancedSGD)")
+    plt.legend()
+
+    # Mix Probability over Batches (EnhancedSGD only)
+    plt.subplot(4, 2, 6)
+    for optimizer_name, data in results.items():
+        if 'mix_prob' in data and optimizer_name == "EnhancedSGD":
+            plt.plot(range(1, len(data['mix_prob']) + 1), data['mix_prob'], label=optimizer_name)
+    plt.xlabel("Batch")
+    plt.ylabel("Mix Probability")
+    plt.title(f"{dataset_name} - Mix Probability over Batches (EnhancedSGD)")
+    plt.legend()
+
     # Training Time per Epoch
-    plt.subplot(3, 2, 5)
+    plt.subplot(4, 2, 7)
     for optimizer_name, data in results.items():
         if 'epoch_time' in data:
             plt.plot(range(1, num_epochs + 1), data['epoch_time'], label=optimizer_name)
@@ -400,7 +447,7 @@ def plot_results(num_epochs, results, dataset_name):
     plt.legend()
 
     # Memory Usage per Epoch
-    plt.subplot(3, 2, 6)
+    plt.subplot(4, 2, 8)
     for optimizer_name, data in results.items():
         if 'memory_usage' in data:
             vram = [m[0] for m in data['memory_usage']]
@@ -417,7 +464,266 @@ def plot_results(num_epochs, results, dataset_name):
     plt.close()
     print(f"Saved metrics plot to {os.path.join(output_dir, f'{dataset_name}_metrics.png')}")
 
-# ----------------------- Main Function -----------------------
+# ----------------------- Helper Functions -----------------------
+def initialize_optimizer(opt_class, model, dataset_name, usage_case, opt_name):
+    """
+    Initialize optimizer with specific settings.
+
+    Args:
+        opt_class: Optimizer class.
+        model (nn.Module): Model to optimize.
+        dataset_name (str): Name of the dataset.
+        usage_case (str): Usage case scenario.
+        opt_name (str): Name of the optimizer.
+
+    Returns:
+        Optimizer instance.
+    """
+    if opt_name == "EnhancedSGD":
+        return opt_class(
+            model.parameters(),
+            lr=0.01,
+            model=model,
+            usage_case=usage_case,
+            lookahead_k=5,
+            lookahead_alpha=0.5,
+            apply_noise=True,
+            adaptive_momentum=True,
+            gradient_centering=True
+        )
+    else:
+        if dataset_name in ["IMDB", "AG_NEWS"]:
+            return opt_class(model.parameters(), lr=0.01)
+        elif dataset_name in ["MNIST", "CIFAR10"]:
+            if opt_name == "SGD":
+                return opt_class(model.parameters(), lr=0.01, momentum=0.9)
+            else:
+                return opt_class(model.parameters(), lr=0.001)
+        elif dataset_name == "VOC":
+            return opt_class(model.parameters(), lr=0.001)
+        else:
+            return opt_class(model.parameters(), lr=0.01)
+
+def initialize_gradcam(dataset_name, model):
+    """
+    Initialize Grad-CAM based on dataset and model type.
+
+    Args:
+        dataset_name (str): Name of the dataset.
+        model (nn.Module): The model being trained.
+
+    Returns:
+        GradCAM instance or None.
+    """
+    grad_cam = None
+    if dataset_name.lower() in ["cifar10", "voc"]:
+        # Determine target layer based on model type
+        if dataset_name.lower() == "voc":
+            # For FCN ResNet50, assuming 'base_model.classifier.4' is the last conv layer
+            target_layer = 'base_model.classifier.4'
+        else:
+            # For SimpleCNN_CIFAR10, assuming 'conv2' is the target layer
+            target_layer = 'conv2'
+        try:
+            grad_cam = GradCAM(model, target_layer)
+        except ValueError as e:
+            print(f"Grad-CAM initialization error: {e}")
+            grad_cam = None
+    return grad_cam
+
+def save_results_to_json(results):
+    """
+    Saves the training results to a JSON file.
+
+    Args:
+        results (dict): Dictionary containing all results.
+    """
+    results_path = os.path.join(output_dir, "all_results.json")
+    try:
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=4)
+        print(f"\nSaved all results to {results_path}")
+    except Exception as e:
+        print(f"Error saving results to JSON: {e}")
+
+# ----------------------- Run the Main Function -----------------------
+def main():
+    # Set seeds for reproducibility
+    def set_seed(seed=42):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    set_seed()
+
+    # Choose number of epochs
+    try:
+        num_epochs = int(input("Enter the number of epochs for testing each optimizer: "))
+    except ValueError:
+        print("Invalid input. Using default of 10 epochs.")
+        num_epochs = 10
+
+    # Choose dataset or 'all' for multiple datasets
+    dataset_input = input("Choose a dataset (MNIST, CIFAR10, IMDB, AG_NEWS, VOC) or type 'all' for all datasets: ").strip()
+    run_all = dataset_input.lower() == 'all'
+    if run_all:
+        dataset_list = ["MNIST", "CIFAR10", "IMDB", "AG_NEWS", "VOC"]
+    else:
+        valid_datasets = ["MNIST", "CIFAR10", "IMDB", "AG_NEWS", "VOC"]
+        if dataset_input not in valid_datasets:
+            print("Invalid dataset choice. Exiting.")
+            return
+        dataset_list = [dataset_input]
+
+    usage_case = "GenAI"  # Adjust based on your use case
+
+    # Define optimizers to test
+    optimizers = {
+        "EnhancedSGD": EnhancedSGD,
+        "SGD": optim.SGD,
+        "AdamW": optim.AdamW,
+        "RMSprop": optim.RMSprop,
+        "Adam": optim.Adam
+    }
+
+    # Initialize results dictionary
+    results = {}
+
+    # Iterate through each dataset and optimizer combination
+    for dataset_name in dataset_list:
+        print(f"\nPreparing dataset: {dataset_name}")
+
+        for opt_name, opt_class in optimizers.items():
+            print(f"\nTraining with {opt_name} optimizer on {dataset_name} dataset...")
+
+            # Reload the dataset and model for each optimizer to avoid uninitialized variables
+            try:
+                model, train_loader, test_loader, test_dataset = load_dataset(dataset_name)
+                if model is None:
+                    print(f"Dataset {dataset_name} could not be loaded. Skipping optimizer {opt_name}.")
+                    continue
+            except Exception as e:
+                print(f"Error loading dataset {dataset_name}: {e}")
+                continue
+
+            # Initialize optimizer
+            try:
+                optimizer = initialize_optimizer(opt_class, model, dataset_name, usage_case, opt_name)
+            except Exception as e:
+                print(f"Error initializing optimizer {opt_name} for {dataset_name}: {e}")
+                # Clean up before continuing
+                del model, train_loader, test_loader, optimizer
+                gc.collect()
+                torch.cuda.empty_cache()
+                continue
+
+            # Initialize Grad-CAM if applicable
+            grad_cam = initialize_gradcam(dataset_name, model)
+
+            # Train and evaluate
+            try:
+                optimizer_results = train_and_evaluate(
+                    model, optimizer, train_loader, test_loader, num_epochs=num_epochs,
+                    log_interval=50, optimizer_name=opt_name, dataset_name=dataset_name
+                )
+            except Exception as e:
+                print(f"Error during training with {opt_name} on {dataset_name}: {e}")
+                # Clean up before continuing
+                del model, train_loader, test_loader, optimizer, grad_cam
+                gc.collect()
+                torch.cuda.empty_cache()
+                continue
+
+            # Store results
+            results_key = f"{opt_name}_{dataset_name}"
+            results[results_key] = optimizer_results
+
+            # Optionally, generate Grad-CAM visualizations for a few samples
+            if grad_cam and dataset_name.lower() in ["cifar10", "voc"]:
+                try:
+                    generate_gradcam_samples(model, test_loader, grad_cam, dataset_name)
+                except Exception as e:
+                    print(f"Error generating Grad-CAM samples: {e}")
+
+            # Remove Grad-CAM hooks if initialized
+            if grad_cam:
+                grad_cam.remove_hooks()
+
+            # Clean up memory
+            del model, train_loader, test_loader, optimizer, grad_cam
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    # Save all results to a JSON file
+    save_results_to_json(results)
+
+    # Plotting results for each dataset
+    for dataset_name in dataset_list:
+        # Extract relevant keys
+        relevant_keys = [key for key in results.keys() if key.endswith(f"_{dataset_name}")]
+        if not relevant_keys:
+            print(f"No results to plot for dataset: {dataset_name}")
+            continue
+        dataset_results = {key.split('_')[0]: results[key] for key in relevant_keys}
+        plot_results(num_epochs, dataset_results, dataset_name)
+
+    print("\nAll training and evaluations completed.")
+    print("Program finished. Press any key to exit.")
+
+def generate_gradcam_samples(model, test_loader, grad_cam, dataset_name, num_samples=5):
+    """
+    Generates Grad-CAM visualizations for a few samples from the test dataset.
+
+    Args:
+        model (nn.Module): Trained model.
+        test_loader (DataLoader): DataLoader for the test dataset.
+        grad_cam (GradCAM): Grad-CAM instance.
+        dataset_name (str): Name of the dataset.
+        num_samples (int): Number of samples to visualize.
+    """
+    model.eval()
+    samples_visualized = 0
+
+    with torch.no_grad():
+        for batch in test_loader:
+            if dataset_name.lower() in ["imdb", "ag_news"]:
+                # Grad-CAM is not applicable for text classification
+                continue
+            else:
+                data, target = batch
+                data = data.to(device)
+                target = target.to(device)
+
+                if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
+                    target = target.squeeze(1).long()
+
+                output = model(data)
+                preds = output.argmax(dim=1)
+
+                for i in range(data.size(0)):
+                    if samples_visualized >= num_samples:
+                        return
+                    input_image = data[i].unsqueeze(0)
+                    pred_class = preds[i].item()
+
+                    heatmap = grad_cam.generate_heatmap(input_image, pred_class)
+                    overlayed = apply_heatmap_on_image(data[i], heatmap)
+
+                    # Save the overlayed image
+                    image_np = np.transpose(data[i].cpu().numpy(), (1, 2, 0))
+                    image_np = np.clip(image_np * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406]), 0, 1)
+                    image_uint8 = (image_np * 255).astype(np.uint8)
+                    overlayed_uint8 = overlayed.astype(np.uint8)
+
+                    # Save original and Grad-CAM images side by side
+                    combined = np.hstack((image_uint8, overlayed_uint8))
+                    save_path = os.path.join(gradcam_dir, f"gradcam_epoch_{dataset_name}_sample_{samples_visualized+1}.png")
+                    cv2.imwrite(save_path, cv2.cvtColor(combined, cv2.COLOR_RGB2BGR))
+                    print(f"Saved Grad-CAM visualization to {save_path}")
+
+                    samples_visualized += 1
+
 def load_dataset(dataset_name):
     """
     Loads the specified dataset, applies necessary preprocessing, and returns the model and data loaders.
@@ -466,7 +772,7 @@ def load_dataset(dataset_name):
         if os.path.exists(csv_train_path) and os.path.exists(csv_test_path):
             print(f"Loading {dataset_name.upper()} dataset from CSV files.")
             # Load only the text and label columns (Column B and C)
-            # Assuming no headers and columns: A (id), B (text), C (label)
+            # Assuming headers exist
             train_df = pd.read_csv(csv_train_path, usecols=[1, 2], names=['text', 'label'], skiprows=1, dtype={'text': str, 'label': int})
             test_df = pd.read_csv(csv_test_path, usecols=[1, 2], names=['text', 'label'], skiprows=1, dtype={'text': str, 'label': int})
         else:
@@ -548,371 +854,28 @@ def load_dataset(dataset_name):
 
     return model, train_loader, test_loader, test_dataset
 
-def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5, log_interval=50, optimizer_name="", dataset_name=""):
-    model.to(device)
-    model.train()
-    train_losses, test_accuracies, epoch_times, memory_usage = [], [], [], []
-
-    for epoch in range(1, num_epochs + 1):
-        start_time = time.time()
-        vram_start, ram_start = track_memory()
-        running_loss = 0.0
-
-        for batch_idx, batch in enumerate(train_loader):
-            try:
-                if dataset_name.lower() in ["imdb", "ag_news"]:
-                    # Handle text classification batches
-                    input_ids, attention_mask, labels = batch
-                    input_ids = input_ids.to(device)
-                    attention_mask = attention_mask.to(device)
-                    labels = labels.to(device)
-
-                    optimizer.zero_grad()
-                    output = model(input_ids=input_ids, attention_mask=attention_mask)
-                    logits = output.logits if hasattr(output, "logits") else output
-                    loss = nn.CrossEntropyLoss()(logits, labels)
-                else:
-                    # For image/segmentation datasets, expect (data, target) tuples
-                    data, target = batch
-                    data = data.to(device)
-                    target = target.to(device)
-
-                    if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
-                        target = target.squeeze(1).long()
-
-                    optimizer.zero_grad()
-                    output = model(data)
-                    loss = nn.CrossEntropyLoss()(output, target)
-
-                # Backpropagation and optimizer step
-                loss.backward()
-                optimizer.step()
-
-                # Track running loss
-                running_loss += loss.item()
-
-                # Print batch details every 'log_interval' batches
-                if batch_idx % log_interval == 0 or batch_idx == len(train_loader) - 1:
-                    print(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Batch Loss: {loss.item():.4f}")
-
-            except Exception as e:
-                print(f"Error during training with {optimizer_name} on {dataset_name}, Epoch {epoch}, Batch {batch_idx}: {e}")
-                continue
-
-        # Calculate average loss and log test accuracy
-        epoch_loss = running_loss / len(train_loader)
-        train_losses.append(epoch_loss)
-        test_accuracy = test_epoch(model, test_loader, dataset_name, log_interval=log_interval)
-        test_accuracies.append(test_accuracy)
-
-        # Track memory and time
-        vram_end, ram_end = track_memory()
-        epoch_time = time_epoch(start_time)
-        epoch_times.append(epoch_time)
-        memory_usage.append((vram_end - vram_start, ram_end - ram_start))
-
-        print(f"Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
-        print(f"Memory Usage - VRAM Change: {vram_end - vram_start:.2f} MB, RAM Change: {ram_end - ram_start:.2f} MB")
-
-    return train_losses, test_accuracies, epoch_times, memory_usage
-
-def test_epoch(model, test_loader, dataset_name="VOC", log_interval=50):
-    model.eval()
-    total_correct = 0
-    total_elements = 0
-
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
-            try:
-                if dataset_name.lower() in ["imdb", "ag_news"]:
-                    # Handle text classification
-                    input_ids, attention_mask, labels = batch
-                    input_ids = input_ids.to(device)
-                    attention_mask = attention_mask.to(device)
-                    labels = labels.to(device)
-
-                    output = model(input_ids=input_ids, attention_mask=attention_mask)
-                    logits = output.logits if hasattr(output, "logits") else output
-                    preds = logits.argmax(dim=1)
-                    total_correct += (preds == labels).sum().item()
-                    total_elements += labels.size(0)
-                else:
-                    # For image/segmentation datasets
-                    data, target = batch
-                    data = data.to(device)
-                    target = target.to(device)
-
-                    if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
-                        target = target.squeeze(1).long()
-                        output = model(data)
-                        preds = output.argmax(dim=1)  # Get per-pixel class predictions
-                        total_correct += (preds == target).sum().item()
-                        total_elements += target.numel()  # Count total pixels
-                    else:
-                        output = model(data)
-                        preds = output.argmax(dim=1)
-                        total_correct += (preds == target).sum().item()
-                        total_elements += target.size(0)
-
-                # Print batch summary every 'log_interval' batches
-                if batch_idx % log_interval == 0 or batch_idx == len(test_loader) - 1:
-                    print(f"Batch [{batch_idx}/{len(test_loader)}] processed, Total Correct: {total_correct}, Total Elements: {total_elements}")
-
-            except Exception as e:
-                print(f"Error during batch processing in test_epoch for {dataset_name}, Batch {batch_idx}: {e}")
-                continue
-
-    model.train()
-    accuracy = total_correct / total_elements if total_elements > 0 else 0
-    print(f"Testing accuracy for {dataset_name}: {accuracy:.4f}")
-    return accuracy
-
-# ----------------------- Plotting Results -----------------------
-def plot_results(num_epochs, results, dataset_name):
+def dataset_exists(dataset_name):
     """
-    Plots the training loss, test accuracy, learning rate, gradient variance,
-    epoch times, and memory usage for each optimizer.
+    Checks if the specified dataset exists in the data directory.
 
-    Parameters:
-        num_epochs (int): Number of epochs.
-        results (dict): Dictionary containing lists of metrics for each optimizer.
-        dataset_name (str): Name of the dataset being plotted.
+    Args:
+        dataset_name (str): Name of the dataset.
+
+    Returns:
+        bool: True if dataset exists, False otherwise.
     """
-    plt.figure(figsize=(20, 15))
+    data_path = "./data"
+    if dataset_name == "MNIST":
+        return os.path.exists(os.path.join(data_path, "MNIST"))
+    elif dataset_name == "CIFAR10":
+        return os.path.exists(os.path.join(data_path, "cifar-10-batches-py"))
+    elif dataset_name in ["IMDB", "AG_NEWS"]:
+        return os.path.exists(os.path.join(data_path, f"{dataset_name.lower()}_train.csv")) and \
+               os.path.exists(os.path.join(data_path, f"{dataset_name.lower()}_test.csv"))
+    elif dataset_name == "VOC":
+        return os.path.exists(os.path.join(data_path, "VOCdevkit", "VOC2012"))
+    return False
 
-    # Training Loss Comparison
-    plt.subplot(3, 2, 1)
-    for optimizer_name, data in results.items():
-        if 'loss' in data:
-            plt.plot(range(1, num_epochs + 1), data['loss'], label=optimizer_name)
-    plt.xlabel("Epoch")
-    plt.ylabel("Training Loss")
-    plt.title(f"{dataset_name} - Training Loss Comparison")
-    plt.legend()
-
-    # Test Accuracy Comparison
-    plt.subplot(3, 2, 2)
-    for optimizer_name, data in results.items():
-        if 'accuracy' in data:
-            plt.plot(range(1, num_epochs + 1), data['accuracy'], label=optimizer_name)
-    plt.xlabel("Epoch")
-    plt.ylabel("Test Accuracy")
-    plt.title(f"{dataset_name} - Test Accuracy Comparison")
-    plt.legend()
-
-    # Learning Rate over Batches (EnhancedSGD only)
-    plt.subplot(3, 2, 3)
-    for optimizer_name, data in results.items():
-        if 'learning_rate' in data and optimizer_name == "EnhancedSGD":
-            plt.plot(range(1, len(data['learning_rate']) + 1), data['learning_rate'], label=optimizer_name)
-    plt.xlabel("Batch")
-    plt.ylabel("Learning Rate")
-    plt.title(f"{dataset_name} - Learning Rate over Batches (EnhancedSGD)")
-    plt.legend()
-
-    # Gradient Variance over Batches (EnhancedSGD only)
-    plt.subplot(3, 2, 4)
-    for optimizer_name, data in results.items():
-        if 'gradient_variance' in data and optimizer_name == "EnhancedSGD":
-            plt.plot(range(1, len(data['gradient_variance']) + 1), data['gradient_variance'], label=optimizer_name)
-    plt.xlabel("Batch")
-    plt.ylabel("Gradient Variance")
-    plt.title(f"{dataset_name} - Gradient Variance over Batches (EnhancedSGD)")
-    plt.legend()
-
-    # Training Time per Epoch
-    plt.subplot(3, 2, 5)
-    for optimizer_name, data in results.items():
-        if 'epoch_time' in data:
-            plt.plot(range(1, num_epochs + 1), data['epoch_time'], label=optimizer_name)
-    plt.xlabel("Epoch")
-    plt.ylabel("Epoch Time (s)")
-    plt.title(f"{dataset_name} - Training Time per Epoch")
-    plt.legend()
-
-    # Memory Usage per Epoch
-    plt.subplot(3, 2, 6)
-    for optimizer_name, data in results.items():
-        if 'memory_usage' in data:
-            vram = [m[0] for m in data['memory_usage']]
-            ram = [m[1] for m in data['memory_usage']]
-            plt.plot(range(1, num_epochs + 1), vram, label=f"{optimizer_name} - VRAM (MB)")
-            plt.plot(range(1, num_epochs + 1), ram, label=f"{optimizer_name} - RAM (MB)")
-    plt.xlabel("Epoch")
-    plt.ylabel("Memory Usage (MB)")
-    plt.title(f"{dataset_name} - Memory Usage per Epoch")
-    plt.legend()
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"{dataset_name}_metrics.png"))
-    plt.close()
-    print(f"Saved metrics plot to {os.path.join(output_dir, f'{dataset_name}_metrics.png')}")
-
-# ----------------------- Main Function -----------------------
-def main():
-    # Set seeds for reproducibility
-    def set_seed(seed=42):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    set_seed()
-
-    # Choose number of epochs
-    try:
-        num_epochs = int(input("Enter the number of epochs for testing each optimizer: "))
-    except ValueError:
-        print("Invalid input. Using default of 10 epochs.")
-        num_epochs = 10
-
-    # Choose dataset or 'all' for multiple datasets
-    dataset_input = input("Choose a dataset (MNIST, CIFAR10, IMDB, AG_NEWS, VOC) or type 'all' for all datasets: ").strip()
-    run_all = dataset_input.lower() == 'all'
-    if run_all:
-        dataset_list = ["MNIST", "CIFAR10", "IMDB", "AG_NEWS", "VOC"]
-    else:
-        valid_datasets = ["MNIST", "CIFAR10", "IMDB", "AG_NEWS", "VOC"]
-        if dataset_input not in valid_datasets:
-            print("Invalid dataset choice. Exiting.")
-            return
-        dataset_list = [dataset_input]
-
-    usage_case = "GenAI"  # Adjust based on your use case
-
-    # Define optimizers to test
-    optimizers = {
-        "EnhancedSGD": EnhancedSGD,
-        "SGD": optim.SGD,
-        "AdamW": optim.AdamW,
-        "RMSprop": optim.RMSprop,
-        "Adam": optim.Adam
-    }
-
-    # Initialize results dictionary
-    results = {}
-
-    # Iterate through each dataset and optimizer combination
-    for dataset_name in dataset_list:
-        print(f"\nPreparing dataset: {dataset_name}")
-
-        for opt_name, opt_class in optimizers.items():
-            print(f"\nTraining with {opt_name} optimizer on {dataset_name} dataset...")
-
-            # Reload the dataset and model for each optimizer to avoid uninitialized variables
-            try:
-                model, train_loader, test_loader, test_dataset = load_dataset(dataset_name)
-                if model is None:
-                    print(f"Dataset {dataset_name} could not be loaded. Skipping optimizer {opt_name}.")
-                    continue
-            except Exception as e:
-                print(f"Error loading dataset {dataset_name}: {e}")
-                continue
-
-            # Initialize optimizer
-            try:
-                if opt_name == "EnhancedSGD":
-                    optimizer = opt_class(
-                        model.parameters(),
-                        lr=0.01,
-                        model=model,
-                        usage_case=usage_case,
-                        use_amp=True,
-                        lookahead_k=5,
-                        lookahead_alpha=0.5,
-                        apply_noise=True,
-                        adaptive_momentum=True,
-                        gradient_centering=True
-                    )
-                else:
-                    if dataset_name in ["IMDB", "AG_NEWS"]:
-                        optimizer = opt_class(model.parameters(), lr=0.01)
-                    elif dataset_name in ["MNIST", "CIFAR10"]:
-                        if opt_name == "SGD":
-                            optimizer = opt_class(model.parameters(), lr=0.01, momentum=0.9)
-                        else:
-                            optimizer = opt_class(model.parameters(), lr=0.001)
-                    elif dataset_name == "VOC":
-                        optimizer = opt_class(model.parameters(), lr=0.001)
-                    else:
-                        optimizer = opt_class(model.parameters(), lr=0.01)
-            except Exception as e:
-                print(f"Error initializing optimizer {opt_name} for {dataset_name}: {e}")
-                # Clean up before continuing
-                del model, train_loader, test_loader, optimizer
-                gc.collect()
-                torch.cuda.empty_cache()
-                continue
-
-            # Initialize Grad-CAM if applicable
-            grad_cam = None
-            if dataset_name.lower() in ["cifar10", "voc"]:
-                # Determine target layer based on model type
-                if dataset_name.lower() == "voc":
-                    # For FCN ResNet50, assuming 'base_model.classifier.4' is the last conv layer
-                    target_layer = 'base_model.classifier.4'
-                else:
-                    # For SimpleCNN_CIFAR10, assuming 'conv2' is the target layer
-                    target_layer = 'conv2'
-                try:
-                    grad_cam = GradCAM(model, target_layer)
-                except ValueError as e:
-                    print(f"Grad-CAM initialization error: {e}")
-                    grad_cam = None
-
-            # Train and evaluate
-            try:
-                train_losses, test_accuracies, epoch_times, memory_usage = train_and_evaluate(
-                    model, optimizer, train_loader, test_loader, num_epochs=num_epochs,
-                    log_interval=50, optimizer_name=opt_name, dataset_name=dataset_name
-                )
-            except Exception as e:
-                print(f"Error during training with {opt_name} on {dataset_name}: {e}")
-                # Clean up before continuing
-                del model, train_loader, test_loader, optimizer, grad_cam
-                gc.collect()
-                torch.cuda.empty_cache()
-                continue
-
-            # Store results
-            results_key = f"{opt_name}_{dataset_name}"
-            results[results_key] = {
-                "loss": train_losses,
-                "accuracy": test_accuracies,
-                "epoch_time": epoch_times,
-                "memory_usage": memory_usage
-            }
-
-            # Remove Grad-CAM hooks if initialized
-            if grad_cam:
-                grad_cam.remove_hooks()
-
-            # Clean up memory
-            del model, train_loader, test_loader, optimizer, grad_cam
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    # Save all results to a JSON file
-    results_path = os.path.join(output_dir, "all_results.json")
-    try:
-        with open(results_path, "w") as f:
-            json.dump(results, f, indent=4)
-        print(f"\nSaved all results to {results_path}")
-    except Exception as e:
-        print(f"Error saving results to JSON: {e}")
-
-    # Plotting results for each dataset
-    for dataset_name in dataset_list:
-        # Extract relevant keys
-        relevant_keys = [key for key in results.keys() if key.endswith(f"_{dataset_name}")]
-        if not relevant_keys:
-            print(f"No results to plot for dataset: {dataset_name}")
-            continue
-        dataset_results = {key.split('_')[0]: results[key] for key in relevant_keys}
-        plot_results(num_epochs, dataset_results, dataset_name)
-
-    print("\nAll training and evaluations completed.")
-    print("Program finished. Press any key to exit.")
-
+# ----------------------- Run the Main Function -----------------------
 if __name__ == "__main__":
     main()
