@@ -5,11 +5,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 from EnhancedSGD import EnhancedSGD  # Ensure this module is in your project directory
 from transformers import BertTokenizer, BertForSequenceClassification
-from datasets import load_dataset
+from datasets import load_dataset as hf_load_dataset
+import pandas as pd
 import time
 import psutil  # For RAM tracking
 import gc  # Garbage collector to free memory when necessary
@@ -21,7 +22,7 @@ from PIL import Image
 
 # ----------------------- Device Configuration -----------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#print(f"Using device: {device}")
+print(f"Using device: {device}")
 
 # ----------------------- Directory Setup -----------------------
 output_dir = "results"
@@ -103,7 +104,7 @@ class TextClassifier(nn.Module):
         self.bert = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=num_class)
 
     def forward(self, input_ids, attention_mask):
-        return self.bert(input_ids=input_ids, attention_mask=attention_mask).logits
+        return self.bert(input_ids=input_ids, attention_mask=attention_mask)
 
 class SimpleUNet(nn.Module):
     """
@@ -133,107 +134,6 @@ def dataset_exists(dataset_name):
     elif dataset_name == "VOC":
         return os.path.exists(os.path.join(data_path, "VOCdevkit", "VOC2012"))
     return False
-
-from datasets import load_dataset
-
-import pandas as pd
-
-def load_dataset(dataset_name):
-    data_path = "./data"
-    if dataset_name.lower() == "mnist":
-        if not dataset_exists("MNIST"):
-            print("MNIST dataset not found. Downloading...")
-            datasets.MNIST(root=data_path, train=True, download=True)
-            datasets.MNIST(root=data_path, train=False, download=True)
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
-        ])
-        train_dataset = datasets.MNIST(root=data_path, train=True, transform=transform, download=False)
-        test_dataset = datasets.MNIST(root=data_path, train=False, transform=transform, download=False)
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        model = SimpleCNN_MNIST().to(device)
-
-    elif dataset_name.lower() == "cifar10":
-        if not dataset_exists("CIFAR10"):
-            print("CIFAR10 dataset not found. Downloading...")
-            datasets.CIFAR10(root=data_path, train=True, download=True)
-            datasets.CIFAR10(root=data_path, train=False, download=True)
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-        ])
-        train_dataset = datasets.CIFAR10(root=data_path, train=True, transform=transform, download=False)
-        test_dataset = datasets.CIFAR10(root=data_path, train=False, transform=transform, download=False)
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        model = SimpleCNN_CIFAR10().to(device)
-
-    elif dataset_name.lower() in ["imdb", "ag_news"]:
-        csv_train_path = os.path.join(data_path, f"{dataset_name.lower()}_train.csv")
-        csv_test_path = os.path.join(data_path, f"{dataset_name.lower()}_test.csv")
-
-        if os.path.exists(csv_train_path) and os.path.exists(csv_test_path):
-            print(f"Loading {dataset_name.upper()} dataset from CSV files.")
-            train_df = pd.read_csv(csv_train_path)
-            test_df = pd.read_csv(csv_test_path)
-        else:
-            print(f"{dataset_name.upper()} dataset not found in CSV. Downloading from Hugging Face.")
-            dataset = load_dataset(dataset_name.lower())
-            train_df, test_df = dataset["train"].to_pandas(), dataset["test"].to_pandas()
-
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-
-        def tokenize_function(texts):
-            return tokenizer(texts, padding="max_length", truncation=True, max_length=128, return_tensors="pt")
-
-        train_texts = train_df["text"].tolist()
-        test_texts = test_df["text"].tolist()
-        train_labels = train_df["label"].tolist()
-        test_labels = test_df["label"].tolist()
-
-        train_encodings = tokenize_function(train_texts)
-        test_encodings = tokenize_function(test_texts)
-
-        train_encodings["labels"] = torch.tensor(train_labels)
-        test_encodings["labels"] = torch.tensor(test_labels)
-
-        train_dataset = torch.utils.data.TensorDataset(train_encodings["input_ids"], train_encodings["attention_mask"], train_encodings["labels"])
-        test_dataset = torch.utils.data.TensorDataset(test_encodings["input_ids"], test_encodings["attention_mask"], test_encodings["labels"])
-
-        train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-
-        num_class = len(set(train_labels))
-        model = TextClassifier(num_class).to(device)
-
-    elif dataset_name.lower() == "voc":
-        if not dataset_exists("VOC"):
-            print("Pascal VOC dataset not found. Downloading...")
-            datasets.VOCSegmentation(root=data_path, year="2012", image_set="train", download=True)
-            datasets.VOCSegmentation(root=data_path, year="2012", image_set="val", download=True)
-
-        transform_image = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=Image.BILINEAR),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
-        transform_mask = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=Image.NEAREST),
-            transforms.ToTensor()
-        ])
-
-        train_dataset = VOCSegmentationWithTransform(root=data_path, year="2012", image_set="train", download=False, transform_image=transform_image, transform_mask=transform_mask)
-        test_dataset = VOCSegmentationWithTransform(root=data_path, year="2012", image_set="val", download=False, transform_image=transform_image, transform_mask=transform_mask)
-
-        train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
-        model = SimpleUNet(num_classes=21).to(device)
-    else:
-        raise ValueError("Unsupported dataset. Choose from 'MNIST', 'CIFAR10', 'IMDB', 'AG_NEWS', 'VOC'.")
-
-    return model, train_loader, test_loader, test_dataset
 
 # ----------------------- Grad-CAM Implementation -----------------------
 class GradCAM:
@@ -328,37 +228,45 @@ def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5
         running_loss = 0.0
 
         for batch_idx, batch in enumerate(train_loader):
-            if dataset_name.lower() in ["imdb", "ag_news"]:
-                # Handle text classification batches
-                input_ids, attention_mask, labels = batch
-                input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
-                
-                output = model(input_ids=input_ids, attention_mask=attention_mask)
-                # Check if output has logits attribute or is a tensor directly
-                logits = output.logits if hasattr(output, "logits") else output
-                loss = nn.CrossEntropyLoss()(logits, labels)
-            else:
-                # For other datasets, we expect standard (data, target) tuples
-                data, target = batch
-                data, target = data.to(device), target.to(device)
+            try:
+                if dataset_name.lower() in ["imdb", "ag_news"]:
+                    # Handle text classification batches
+                    input_ids, attention_mask, labels = batch
+                    input_ids = input_ids.to(device)
+                    attention_mask = attention_mask.to(device)
+                    labels = labels.to(device)
 
-                if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
-                    target = target.squeeze(1).long()
-                
-                output = model(data)
-                loss = nn.CrossEntropyLoss()(output, target)
+                    optimizer.zero_grad()
+                    output = model(input_ids=input_ids, attention_mask=attention_mask)
+                    logits = output.logits if hasattr(output, "logits") else output
+                    loss = nn.CrossEntropyLoss()(logits, labels)
+                else:
+                    # For image/segmentation datasets, expect (data, target) tuples
+                    data, target = batch
+                    data = data.to(device)
+                    target = target.to(device)
 
-            # Backpropagation and optimizer step
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                    if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
+                        target = target.squeeze(1).long()
 
-            # Track running loss
-            running_loss += loss.item()
+                    optimizer.zero_grad()
+                    output = model(data)
+                    loss = nn.CrossEntropyLoss()(output, target)
 
-            # Print batch details every 'log_interval' batches
-            if batch_idx % log_interval == 0 or batch_idx == len(train_loader) - 1:
-                print(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Batch Loss: {loss.item():.4f}")
+                # Backpropagation and optimizer step
+                loss.backward()
+                optimizer.step()
+
+                # Track running loss
+                running_loss += loss.item()
+
+                # Print batch details every 'log_interval' batches
+                if batch_idx % log_interval == 0 or batch_idx == len(train_loader) - 1:
+                    print(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Batch Loss: {loss.item():.4f}")
+
+            except Exception as e:
+                print(f"Error during training with {optimizer_name} on {dataset_name}, Epoch {epoch}, Batch {batch_idx}: {e}")
+                continue
 
         # Calculate average loss and log test accuracy
         epoch_loss = running_loss / len(train_loader)
@@ -385,43 +293,31 @@ def test_epoch(model, test_loader, dataset_name="VOC", log_interval=50):
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
             try:
-                if isinstance(model, TextClassifier):
-                    # Text classification handling
-                    inputs = {
-                        "input_ids": batch["input_ids"].to(device),
-                        "attention_mask": batch["attention_mask"].to(device)
-                    }
-                    targets = batch["label"].to(device)
-                    output = model(**inputs)
-                    preds = output.argmax(dim=1)
-                    total_correct += (preds == targets).sum().item()
-                    total_elements += targets.size(0)
+                if dataset_name.lower() in ["imdb", "ag_news"]:
+                    # Handle text classification
+                    input_ids, attention_mask, labels = batch
+                    input_ids = input_ids.to(device)
+                    attention_mask = attention_mask.to(device)
+                    labels = labels.to(device)
+
+                    output = model(input_ids=input_ids, attention_mask=attention_mask)
+                    logits = output.logits if hasattr(output, "logits") else output
+                    preds = logits.argmax(dim=1)
+                    total_correct += (preds == labels).sum().item()
+                    total_elements += labels.size(0)
                 else:
                     # For image/segmentation datasets
                     data, target = batch
-                    data, target = data.to(device), target.to(device)
+                    data = data.to(device)
+                    target = target.to(device)
 
                     if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
-                        # Handle per-pixel accuracy for segmentation tasks
-                        target = target.squeeze(1).long()  # Ensure target has correct shape and dtype
+                        target = target.squeeze(1).long()
                         output = model(data)
-
-                        # Ensure output is a tensor and has correct shape
-                        if not isinstance(output, torch.Tensor):
-                            raise TypeError(f"Expected tensor output, got {type(output)}")
-                        assert output.shape[1] == 21, f"Expected 21 classes, got {output.shape[1]}"
-                        assert output.shape[2:] == target.shape[1:], (
-                            f"Output spatial dimensions {output.shape[2:]} do not match target {target.shape[1:]}"
-                        )
-                        assert target.dtype == torch.long, f"Expected target dtype torch.long, got {target.dtype}"
-
                         preds = output.argmax(dim=1)  # Get per-pixel class predictions
-
-                        # Calculate per-pixel accuracy
                         total_correct += (preds == target).sum().item()
                         total_elements += target.numel()  # Count total pixels
                     else:
-                        # For other tasks, assume standard classification
                         output = model(data)
                         preds = output.argmax(dim=1)
                         total_correct += (preds == target).sum().item()
@@ -432,9 +328,338 @@ def test_epoch(model, test_loader, dataset_name="VOC", log_interval=50):
                     print(f"Batch [{batch_idx}/{len(test_loader)}] processed, Total Correct: {total_correct}, Total Elements: {total_elements}")
 
             except Exception as e:
-                print(f"Error during batch processing in test_epoch: {e}")
-                if 'str' in str(e).lower():
-                    print("[Error Trace] A 'str' type was detected in tensor operations during testing.")
+                print(f"Error during batch processing in test_epoch for {dataset_name}, Batch {batch_idx}: {e}")
+                continue
+
+    model.train()
+    accuracy = total_correct / total_elements if total_elements > 0 else 0
+    print(f"Testing accuracy for {dataset_name}: {accuracy:.4f}")
+    return accuracy
+
+# ----------------------- Plotting Results -----------------------
+def plot_results(num_epochs, results, dataset_name):
+    """
+    Plots the training loss, test accuracy, learning rate, gradient variance,
+    epoch times, and memory usage for each optimizer.
+
+    Parameters:
+        num_epochs (int): Number of epochs.
+        results (dict): Dictionary containing lists of metrics for each optimizer.
+        dataset_name (str): Name of the dataset being plotted.
+    """
+    plt.figure(figsize=(20, 15))
+
+    # Training Loss Comparison
+    plt.subplot(3, 2, 1)
+    for optimizer_name, data in results.items():
+        if 'loss' in data:
+            plt.plot(range(1, num_epochs + 1), data['loss'], label=optimizer_name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
+    plt.title(f"{dataset_name} - Training Loss Comparison")
+    plt.legend()
+
+    # Test Accuracy Comparison
+    plt.subplot(3, 2, 2)
+    for optimizer_name, data in results.items():
+        if 'accuracy' in data:
+            plt.plot(range(1, num_epochs + 1), data['accuracy'], label=optimizer_name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test Accuracy")
+    plt.title(f"{dataset_name} - Test Accuracy Comparison")
+    plt.legend()
+
+    # Learning Rate over Batches (EnhancedSGD only)
+    plt.subplot(3, 2, 3)
+    for optimizer_name, data in results.items():
+        if 'learning_rate' in data and optimizer_name == "EnhancedSGD":
+            plt.plot(range(1, len(data['learning_rate']) + 1), data['learning_rate'], label=optimizer_name)
+    plt.xlabel("Batch")
+    plt.ylabel("Learning Rate")
+    plt.title(f"{dataset_name} - Learning Rate over Batches (EnhancedSGD)")
+    plt.legend()
+
+    # Gradient Variance over Batches (EnhancedSGD only)
+    plt.subplot(3, 2, 4)
+    for optimizer_name, data in results.items():
+        if 'gradient_variance' in data and optimizer_name == "EnhancedSGD":
+            plt.plot(range(1, len(data['gradient_variance']) + 1), data['gradient_variance'], label=optimizer_name)
+    plt.xlabel("Batch")
+    plt.ylabel("Gradient Variance")
+    plt.title(f"{dataset_name} - Gradient Variance over Batches (EnhancedSGD)")
+    plt.legend()
+
+    # Training Time per Epoch
+    plt.subplot(3, 2, 5)
+    for optimizer_name, data in results.items():
+        if 'epoch_time' in data:
+            plt.plot(range(1, num_epochs + 1), data['epoch_time'], label=optimizer_name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Epoch Time (s)")
+    plt.title(f"{dataset_name} - Training Time per Epoch")
+    plt.legend()
+
+    # Memory Usage per Epoch
+    plt.subplot(3, 2, 6)
+    for optimizer_name, data in results.items():
+        if 'memory_usage' in data:
+            vram = [m[0] for m in data['memory_usage']]
+            ram = [m[1] for m in data['memory_usage']]
+            plt.plot(range(1, num_epochs + 1), vram, label=f"{optimizer_name} - VRAM (MB)")
+            plt.plot(range(1, num_epochs + 1), ram, label=f"{optimizer_name} - RAM (MB)")
+    plt.xlabel("Epoch")
+    plt.ylabel("Memory Usage (MB)")
+    plt.title(f"{dataset_name} - Memory Usage per Epoch")
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"{dataset_name}_metrics.png"))
+    plt.close()
+    print(f"Saved metrics plot to {os.path.join(output_dir, f'{dataset_name}_metrics.png')}")
+
+# ----------------------- Main Function -----------------------
+def load_dataset(dataset_name):
+    """
+    Loads the specified dataset, applies necessary preprocessing, and returns the model and data loaders.
+
+    Args:
+        dataset_name (str): Name of the dataset to load.
+
+    Returns:
+        tuple: (model, train_loader, test_loader, test_dataset)
+    """
+    data_path = "./data"
+    if dataset_name.lower() == "mnist":
+        if not dataset_exists("MNIST"):
+            print("MNIST dataset not found. Downloading...")
+            datasets.MNIST(root=data_path, train=True, download=True)
+            datasets.MNIST(root=data_path, train=False, download=True)
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+        train_dataset = datasets.MNIST(root=data_path, train=True, transform=transform, download=False)
+        test_dataset = datasets.MNIST(root=data_path, train=False, transform=transform, download=False)
+        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        model = SimpleCNN_MNIST().to(device)
+
+    elif dataset_name.lower() == "cifar10":
+        if not dataset_exists("CIFAR10"):
+            print("CIFAR10 dataset not found. Downloading...")
+            datasets.CIFAR10(root=data_path, train=True, download=True)
+            datasets.CIFAR10(root=data_path, train=False, download=True)
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ])
+        train_dataset = datasets.CIFAR10(root=data_path, train=True, transform=transform, download=False)
+        test_dataset = datasets.CIFAR10(root=data_path, train=False, transform=transform, download=False)
+        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        model = SimpleCNN_CIFAR10().to(device)
+
+    elif dataset_name.lower() in ["imdb", "ag_news"]:
+        csv_train_path = os.path.join(data_path, f"{dataset_name.lower()}_train.csv")
+        csv_test_path = os.path.join(data_path, f"{dataset_name.lower()}_test.csv")
+
+        if os.path.exists(csv_train_path) and os.path.exists(csv_test_path):
+            print(f"Loading {dataset_name.upper()} dataset from CSV files.")
+            # Load only the text and label columns (Column B and C)
+            # Assuming no headers and columns: A (id), B (text), C (label)
+            train_df = pd.read_csv(csv_train_path, usecols=[1, 2], names=['text', 'label'], skiprows=1, dtype={'text': str, 'label': int})
+            test_df = pd.read_csv(csv_test_path, usecols=[1, 2], names=['text', 'label'], skiprows=1, dtype={'text': str, 'label': int})
+        else:
+            print(f"{dataset_name.upper()} dataset not found in CSV. Downloading from Hugging Face.")
+            dataset = hf_load_dataset(dataset_name.lower())
+            train_df = dataset["train"].to_pandas()[['text', 'label']]
+            test_df = dataset["test"].to_pandas()[['text', 'label']]
+
+        # Clean and ensure correct types
+        train_df['text'] = train_df['text'].astype(str).fillna('')
+        test_df['text'] = test_df['text'].astype(str).fillna('')
+        train_labels = train_df["label"].astype(int).tolist()
+        test_labels = test_df["label"].astype(int).tolist()
+
+        # Initialize tokenizer
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+        # Tokenization function
+        def tokenize_function(texts):
+            encodings = tokenizer(texts, padding="max_length", truncation=True, max_length=128, return_tensors="pt")
+            return encodings["input_ids"], encodings["attention_mask"]
+
+        # Tokenize and convert to tensors
+        train_input_ids, train_attention_mask = tokenize_function(train_df["text"].tolist())
+        test_input_ids, test_attention_mask = tokenize_function(test_df["text"].tolist())
+        train_labels_tensor = torch.tensor(train_labels, dtype=torch.long)
+        test_labels_tensor = torch.tensor(test_labels, dtype=torch.long)
+
+        # Create TensorDatasets
+        train_dataset = TensorDataset(train_input_ids, train_attention_mask, train_labels_tensor)
+        test_dataset = TensorDataset(test_input_ids, test_attention_mask, test_labels_tensor)
+
+        # Create DataLoaders
+        train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+
+        # Define model
+        num_class = len(set(train_labels))
+        model = TextClassifier(num_class).to(device)
+
+    elif dataset_name.lower() == "voc":
+        if not dataset_exists("VOC"):
+            print("Pascal VOC dataset not found. Downloading...")
+            datasets.VOCSegmentation(root=data_path, year="2012", image_set="train", download=True)
+            datasets.VOCSegmentation(root=data_path, year="2012", image_set="val", download=True)
+
+        transform_image = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=Image.BILINEAR),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+        transform_mask = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=Image.NEAREST),
+            transforms.ToTensor()
+        ])
+
+        train_dataset = VOCSegmentationWithTransform(
+            root=data_path,
+            year="2012",
+            image_set="train",
+            download=False,
+            transform_image=transform_image,
+            transform_mask=transform_mask
+        )
+        test_dataset = VOCSegmentationWithTransform(
+            root=data_path,
+            year="2012",
+            image_set="val",
+            download=False,
+            transform_image=transform_image,
+            transform_mask=transform_mask
+        )
+
+        train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=2, pin_memory=True if torch.cuda.is_available() else False)
+        model = SimpleUNet(num_classes=21).to(device)
+    else:
+        raise ValueError("Unsupported dataset. Choose from 'MNIST', 'CIFAR10', 'IMDB', 'AG_NEWS', 'VOC'.")
+
+    return model, train_loader, test_loader, test_dataset
+
+def train_and_evaluate(model, optimizer, train_loader, test_loader, num_epochs=5, log_interval=50, optimizer_name="", dataset_name=""):
+    model.to(device)
+    model.train()
+    train_losses, test_accuracies, epoch_times, memory_usage = [], [], [], []
+
+    for epoch in range(1, num_epochs + 1):
+        start_time = time.time()
+        vram_start, ram_start = track_memory()
+        running_loss = 0.0
+
+        for batch_idx, batch in enumerate(train_loader):
+            try:
+                if dataset_name.lower() in ["imdb", "ag_news"]:
+                    # Handle text classification batches
+                    input_ids, attention_mask, labels = batch
+                    input_ids = input_ids.to(device)
+                    attention_mask = attention_mask.to(device)
+                    labels = labels.to(device)
+
+                    optimizer.zero_grad()
+                    output = model(input_ids=input_ids, attention_mask=attention_mask)
+                    logits = output.logits if hasattr(output, "logits") else output
+                    loss = nn.CrossEntropyLoss()(logits, labels)
+                else:
+                    # For image/segmentation datasets, expect (data, target) tuples
+                    data, target = batch
+                    data = data.to(device)
+                    target = target.to(device)
+
+                    if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
+                        target = target.squeeze(1).long()
+
+                    optimizer.zero_grad()
+                    output = model(data)
+                    loss = nn.CrossEntropyLoss()(output, target)
+
+                # Backpropagation and optimizer step
+                loss.backward()
+                optimizer.step()
+
+                # Track running loss
+                running_loss += loss.item()
+
+                # Print batch details every 'log_interval' batches
+                if batch_idx % log_interval == 0 or batch_idx == len(train_loader) - 1:
+                    print(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Batch Loss: {loss.item():.4f}")
+
+            except Exception as e:
+                print(f"Error during training with {optimizer_name} on {dataset_name}, Epoch {epoch}, Batch {batch_idx}: {e}")
+                continue
+
+        # Calculate average loss and log test accuracy
+        epoch_loss = running_loss / len(train_loader)
+        train_losses.append(epoch_loss)
+        test_accuracy = test_epoch(model, test_loader, dataset_name, log_interval=log_interval)
+        test_accuracies.append(test_accuracy)
+
+        # Track memory and time
+        vram_end, ram_end = track_memory()
+        epoch_time = time_epoch(start_time)
+        epoch_times.append(epoch_time)
+        memory_usage.append((vram_end - vram_start, ram_end - ram_start))
+
+        print(f"Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
+        print(f"Memory Usage - VRAM Change: {vram_end - vram_start:.2f} MB, RAM Change: {ram_end - ram_start:.2f} MB")
+
+    return train_losses, test_accuracies, epoch_times, memory_usage
+
+def test_epoch(model, test_loader, dataset_name="VOC", log_interval=50):
+    model.eval()
+    total_correct = 0
+    total_elements = 0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            try:
+                if dataset_name.lower() in ["imdb", "ag_news"]:
+                    # Handle text classification
+                    input_ids, attention_mask, labels = batch
+                    input_ids = input_ids.to(device)
+                    attention_mask = attention_mask.to(device)
+                    labels = labels.to(device)
+
+                    output = model(input_ids=input_ids, attention_mask=attention_mask)
+                    logits = output.logits if hasattr(output, "logits") else output
+                    preds = logits.argmax(dim=1)
+                    total_correct += (preds == labels).sum().item()
+                    total_elements += labels.size(0)
+                else:
+                    # For image/segmentation datasets
+                    data, target = batch
+                    data = data.to(device)
+                    target = target.to(device)
+
+                    if dataset_name.lower() == "voc" and isinstance(model, SimpleUNet):
+                        target = target.squeeze(1).long()
+                        output = model(data)
+                        preds = output.argmax(dim=1)  # Get per-pixel class predictions
+                        total_correct += (preds == target).sum().item()
+                        total_elements += target.numel()  # Count total pixels
+                    else:
+                        output = model(data)
+                        preds = output.argmax(dim=1)
+                        total_correct += (preds == target).sum().item()
+                        total_elements += target.size(0)
+
+                # Print batch summary every 'log_interval' batches
+                if batch_idx % log_interval == 0 or batch_idx == len(test_loader) - 1:
+                    print(f"Batch [{batch_idx}/{len(test_loader)}] processed, Total Correct: {total_correct}, Total Elements: {total_elements}")
+
+            except Exception as e:
+                print(f"Error during batch processing in test_epoch for {dataset_name}, Batch {batch_idx}: {e}")
                 continue
 
     model.train()
@@ -577,6 +802,9 @@ def main():
             # Reload the dataset and model for each optimizer to avoid uninitialized variables
             try:
                 model, train_loader, test_loader, test_dataset = load_dataset(dataset_name)
+                if model is None:
+                    print(f"Dataset {dataset_name} could not be loaded. Skipping optimizer {opt_name}.")
+                    continue
             except Exception as e:
                 print(f"Error loading dataset {dataset_name}: {e}")
                 continue
@@ -621,7 +849,7 @@ def main():
             if dataset_name.lower() in ["cifar10", "voc"]:
                 # Determine target layer based on model type
                 if dataset_name.lower() == "voc":
-                    # For FCN ResNet50, let's assume 'base_model.classifier.4' is the last conv layer
+                    # For FCN ResNet50, assuming 'base_model.classifier.4' is the last conv layer
                     target_layer = 'base_model.classifier.4'
                 else:
                     # For SimpleCNN_CIFAR10, assuming 'conv2' is the target layer
@@ -686,5 +914,5 @@ def main():
     print("\nAll training and evaluations completed.")
     print("Program finished. Press any key to exit.")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
